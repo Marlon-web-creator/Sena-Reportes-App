@@ -706,16 +706,17 @@ document
 
     e.preventDefault();
 
-    const archivo =
-      document.getElementById("input-archivo").files[0];
+    const archivos = Array.from(
+      document.getElementById("input-archivo").files
+    );
 
     const modulo =
       document.getElementById("input-modulo").value;
 
 
-    if (!archivo) {
+    if (!archivos.length) {
       notificar(
-        "Selecciona un archivo.",
+        "Selecciona al menos un archivo.",
         "error"
       );
 
@@ -725,25 +726,27 @@ document
 
     const fd = new FormData();
 
-    fd.append(
-      "archivo",
-      archivo
-    );
+    // El backend espera la MISMA clave "archivos" repetida una vez
+    // por cada archivo (así FastAPI la mapea a list[UploadFile]).
+    for (const archivo of archivos) {
+      fd.append("archivos", archivo);
+    }
 
     if (modulo) {
-      fd.append(
-        "modulo",
-        modulo
-      );
+      fd.append("modulo", modulo);
     }
 
     // El archivo se sube dentro de la carpeta donde estamos parados.
     if (carpetaActualId !== null) {
-      fd.append(
-        "carpeta_id",
-        carpetaActualId
-      );
+      fd.append("carpeta_id", carpetaActualId);
     }
+
+
+    const btnSubmit = e.target.querySelector(
+      'button[type="submit"]'
+    );
+
+    if (btnSubmit) btnSubmit.disabled = true;
 
 
     try {
@@ -757,13 +760,36 @@ document
       );
 
 
-      await leerRespuesta(res);
+      const data = await leerRespuesta(res);
 
 
-      notificar(
-        "Archivo subido correctamente",
-        "success"
-      );
+      // data tiene la forma:
+      // {
+      //   total, total_subidos, total_fallidos,
+      //   subidos: [...], fallidos: [...]
+      // }
+
+      if (data.total_fallidos > 0) {
+
+        const nombresFallidos = (data.fallidos || [])
+          .map((f) => f.nombre_original || "(sin nombre)")
+          .join(", ");
+
+        notificar(
+          `Subidos: ${data.total_subidos}/${data.total}. ` +
+          `Fallaron: ${nombresFallidos}`,
+          data.total_subidos > 0 ? "success" : "error"
+        );
+
+      } else {
+
+        notificar(
+          data.total_subidos === 1
+            ? "Archivo subido correctamente"
+            : `${data.total_subidos} archivos subidos correctamente`,
+          "success"
+        );
+      }
 
 
       e.target.reset();
@@ -774,17 +800,21 @@ document
     } catch (err) {
 
       console.error(
-        "Error subiendo archivo:",
+        "Error subiendo archivos:",
         err
       );
 
       notificar(
-        `Error al subir el archivo: ${err.message}`,
+        `Error al subir los archivos: ${err.message}`,
         "error"
       );
+
+    } finally {
+
+      if (btnSubmit) btnSubmit.disabled = false;
+
     }
   });
-
 
 /* ============================================================
    BOTÓN "NUEVA CARPETA"

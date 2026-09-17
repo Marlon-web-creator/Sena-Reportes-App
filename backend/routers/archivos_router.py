@@ -209,19 +209,19 @@ def listar_subidos(carpeta_id: int | None = Query(None)):
     return database.listar_archivos_subidos(carpeta_id)
 
 
-@router.post("/subidos")
-async def subir_archivo(
-    archivo: UploadFile = File(...),
-    modulo: str | None = Form(None),
-    carpeta_id: str | None = Form(None),
-):
+async def _subir_un_archivo(
+    archivo: UploadFile,
+    modulo: str | None,
+    carpeta_id_int: int | None,
+) -> dict:
+    """
+    Sube un único archivo a Supabase Storage y registra la fila en la
+    base de datos. Devuelve un dict con "ok": True/False para que el
+    endpoint de subida múltiple pueda seguir con los demás archivos
+    aunque este falle.
+    """
     if not archivo.filename:
-        raise HTTPException(
-            status_code=400,
-            detail="El archivo no tiene nombre.",
-        )
-
-    carpeta_id_int = _parsear_carpeta_id(carpeta_id)
+        return {"ok": False, "nombre_original": None, "error": "El archivo no tiene nombre."}
 
     nombre_guardado = f"{uuid.uuid4().hex[:10]}_{archivo.filename}"
     ruta_storage = f"uploads/{nombre_guardado}"
@@ -244,23 +244,60 @@ async def subir_archivo(
             carpeta_id=carpeta_id_int,
         )
 
-    except HTTPException:
-        raise
+        return {
+            "ok": True,
+            "id": archivo_id,
+            "nombre_original": archivo.filename,
+            "carpeta_id": carpeta_id_int,
+        }
 
     except Exception as e:
         # Si algo falla después de subir el archivo a Storage,
         # intentamos limpiarlo para no dejar huérfanos.
         supabase_storage.eliminar_archivo(ruta_storage)
 
-        raise HTTPException(
-            status_code=500,
-            detail=f"No se pudo guardar el archivo: {e}",
-        )
+        return {
+            "ok": False,
+            "nombre_original": archivo.filename,
+            "error": f"No se pudo guardar el archivo: {e}",
+        }
+
+
+@router.post("/subidos")
+async def subir_archivos(
+    archivos: list[UploadFile] = File(...),
+    modulo: str | None = Form(None),
+    carpeta_id: str | None = Form(None),
+):
+    """
+    Sube uno o varios archivos en una sola petición (selección múltiple
+    o arrastrar-y-soltar desde el frontend). Cada archivo se procesa de
+    forma independiente: si uno falla, los demás igual se suben.
+
+    El frontend debe enviar los archivos bajo la MISMA clave "archivos"
+    repetida una vez por archivo (en JS: for (f of files) formData.
+    append("archivos", f)), en vez de la clave "archivo" que se usaba
+    para un solo archivo.
+    """
+    if not archivos:
+        raise HTTPException(status_code=400, detail="No se recibió ningún archivo.")
+
+    carpeta_id_int = _parsear_carpeta_id(carpeta_id)
+
+    resultados = [
+        await _subir_un_archivo(archivo, modulo, carpeta_id_int)
+        for archivo in archivos
+    ]
+
+    subidos = [r for r in resultados if r["ok"]]
+    fallidos = [r for r in resultados if not r["ok"]]
 
     return {
-        "id": archivo_id,
-        "nombre_original": archivo.filename,
-        "carpeta_id": carpeta_id_int,
+        "total": len(resultados),
+        "total_subidos": len(subidos),
+        "total_fallidos": len(fallidos),
+        "subidos": subidos,
+        "fallidos": fallidos,
     }
 
 

@@ -66,10 +66,11 @@
         <div id="grid-carpetas" class="db-carpetas-grid"></div>
 
         <form id="form-subir" class="upload-form">
-          <input type="file" id="input-archivo" required />
+          <input type="file" id="input-archivo" multiple required />
           <input type="text" id="input-modulo" placeholder="Módulo (opcional)" />
-          <button type="submit">Subir archivo</button>
+          <button type="submit">Subir archivos</button>
         </form>
+        <div id="lista-archivos-seleccionados" class="upload-lista-seleccionados"></div>
         <table class="db-table">
           <thead>
             <tr><th>Nombre</th><th>Módulo</th><th>Tamaño</th><th>Fecha</th><th>Acciones</th></tr>
