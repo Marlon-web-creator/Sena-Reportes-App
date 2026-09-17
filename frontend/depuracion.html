@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Depuración de Por Evaluar</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.css" />
+<link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="back-link" href="index.html">&larr; Volver</a>
+    <h1>Depuración de "Por Evaluar"</h1>
+  </header>
+
+  <main class="module-layout">
+    <section class="panel">
+      <h2>1. Configuración</h2>
+
+      <label class="field">
+        <span>Límite de "POR EVALUAR" a superar</span>
+        <input type="number" id="limite" value="20" min="0" />
+      </label>
+
+      <label class="field">
+        <span>Archivo Excel (.xlsx)</span>
+        <input type="file" id="archivo" accept=".xlsx" />
+      </label>
+
+      <div id="nombreArchivo" class="file-list"></div>
+
+      <button id="btnProcesar" class="btn-primary">Procesar</button>
+      <div id="progreso" class="progreso oculto">Procesando…</div>
+    </section>
+
+    <section class="panel">
+      <h2>2. Resultado</h2>
+      <div id="resultado" class="resultado">
+        <p class="placeholder">Aquí aparecerán las estadísticas y el archivo generado.</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>3. Historial reciente</h2>
+      <div id="historial" class="historial"></div>
+    </section>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.js"></script>
+  <script src="js/toasts.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/depuracion.js"></script>
+</body>
+</html>

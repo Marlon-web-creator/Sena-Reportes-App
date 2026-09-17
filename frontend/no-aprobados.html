@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Consolidador No Aprobados / Por Evaluar</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.css" />
+<link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="back-link" href="index.html">&larr; Volver</a>
+    <h1>Consolidador No Aprobados / Por Evaluar</h1>
+  </header>
+
+  <main class="module-layout">
+    <section class="panel">
+      <h2>1. Configuración</h2>
+
+      <label class="field">
+        <span>Filtro a consolidar</span>
+        <select id="filtro">
+          <option value="NO APROBADO">NO APROBADO</option>
+          <option value="POR EVALUAR">POR EVALUAR</option>
+        </select>
+      </label>
+
+      <label class="field checkbox">
+        <input type="checkbox" id="generarGeneral" />
+        <span>Generar también un consolidado general (todas las fichas en un solo libro)</span>
+      </label>
+
+      <label class="field">
+        <span>Archivos "Reporte Juicios de Evaluación" (.xls / .xlsx)</span>
+        <input type="file" id="archivos" multiple accept=".xls,.xlsx" />
+      </label>
+
+      <div id="listaArchivos" class="file-list"></div>
+
+      <button id="btnProcesar" class="btn-primary">Procesar</button>
+      <div id="progreso" class="progreso oculto">Procesando…</div>
+    </section>
+
+    <section class="panel">
+      <h2>2. Resultado</h2>
+      <div id="resultado" class="resultado">
+        <p class="placeholder">Aquí aparecerán las estadísticas y los archivos generados.</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>3. Historial reciente</h2>
+      <div id="historial" class="historial"></div>
+    </section>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.js"></script>
+  <script src="js/toasts.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/no-aprobados.js"></script>
+</body>
+</html>

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Correo de Aprendices</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.css" />
+<link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="back-link" href="index.html">&larr; Volver</a>
+    <h1>Correo de Aprendices</h1>
+  </header>
+
+  <main class="module-layout">
+    <section class="panel">
+      <h2>1. Configuración</h2>
+
+      <label class="field">
+        <span>Consolidado (documento en columna D)</span>
+        <input type="file" id="consolidado" accept=".xls,.xlsx,.xlsm" />
+      </label>
+
+      <label class="field">
+        <span>Archivos xls con los correos (documento en columna B, correo en columna F)</span>
+        <input type="file" id="archivosXls" multiple accept=".xls,.xlsx,.xlsm" />
+      </label>
+
+      <div id="resumenSeleccion" class="file-list"></div>
+
+      <label class="field">
+        <span>Fila donde empiezan los datos en el consolidado</span>
+        <input type="number" id="filaInicioConsolidado" value="2" min="1" />
+      </label>
+
+      <label class="field">
+        <span>Columna del documento en el consolidado (1 = A, 4 = D, etc.)</span>
+        <input type="number" id="colDocumentoConsolidado" value="4" min="1" />
+      </label>
+
+      <label class="field">
+        <span>Fila donde empiezan los datos en los archivos xls</span>
+        <input type="number" id="filaInicioXls" value="2" min="1" />
+      </label>
+
+      <button id="btnProcesar" class="btn-primary">Procesar</button>
+      <div id="progreso" class="progreso oculto">Procesando…</div>
+    </section>
+
+    <section class="panel">
+      <h2>2. Resultado</h2>
+      <div id="resultado" class="resultado">
+        <p class="placeholder">Aquí aparecerán las estadísticas y el archivo generado.</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>3. Historial reciente</h2>
+      <div id="historial" class="historial"></div>
+    </section>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.js"></script>
+  <script src="js/toasts.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/correos.js"></script>
+</body>
+</html>
