@@ -2,8 +2,9 @@ import os
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 import database
 
@@ -41,6 +42,42 @@ def resolver_ruta_archivo(ruta: str | None) -> Path | None:
     return ruta_actual
 
 
+def _parsear_carpeta_id(valor: str | None) -> int | None:
+    """
+    Convierte el valor de carpeta_id recibido por formulario (texto)
+    a int|None, validando que exista si se proporciona.
+    """
+    if valor in (None, "", "null", "raiz", "raíz"):
+        return None
+
+    try:
+        carpeta_id = int(valor)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="carpeta_id inválido.")
+
+    if not database.obtener_carpeta(carpeta_id):
+        raise HTTPException(status_code=404, detail="La carpeta indicada no existe.")
+
+    return carpeta_id
+
+
+# ============================================================
+# MODELOS
+# ============================================================
+
+class CarpetaCrear(BaseModel):
+    nombre: str
+    padre_id: int | None = None
+
+
+class CarpetaRenombrar(BaseModel):
+    nombre: str
+
+
+class ArchivoMover(BaseModel):
+    carpeta_id: int | None = None
+
+
 # ============================================================
 # DIAGNÓSTICO
 # ============================================================
@@ -61,24 +98,145 @@ def listar_rutas():
 
 
 # ============================================================
+# CARPETAS
+# ============================================================
+
+@router.get("/carpetas")
+def listar_carpetas_endpoint(padre_id: int | None = Query(None)):
+    """
+    Lista las subcarpetas directas de padre_id.
+    Sin padre_id devuelve las carpetas de la raíz.
+    """
+    return database.listar_carpetas(padre_id)
+
+
+@router.get("/carpetas/arbol")
+def listar_arbol_carpetas():
+    """
+    Devuelve todas las carpetas (planas, con su padre_id), para construir
+    un árbol completo o un selector de "mover a...".
+    """
+    return database.listar_todas_las_carpetas()
+
+
+@router.get("/carpetas/{carpeta_id}/ruta")
+def ruta_carpeta(carpeta_id: int):
+    """
+    Devuelve el breadcrumb (desde la raíz) hasta la carpeta indicada.
+    """
+    if not database.obtener_carpeta(carpeta_id):
+        raise HTTPException(status_code=404, detail="Carpeta no encontrada")
+
+    return database.obtener_ruta_carpeta(carpeta_id)
+
+
+@router.get("/carpetas/{carpeta_id}/contenido")
+def contenido_carpeta(carpeta_id: int):
+    """
+    Cuenta subcarpetas y archivos dentro de una carpeta (recursivamente).
+    Útil para confirmar antes de eliminarla.
+    """
+    if not database.obtener_carpeta(carpeta_id):
+        raise HTTPException(status_code=404, detail="Carpeta no encontrada")
+
+    return database.contar_contenido_carpeta(carpeta_id)
+
+
+@router.post("/carpetas")
+def crear_carpeta_endpoint(datos: CarpetaCrear):
+    nombre = datos.nombre.strip()
+
+    if not nombre:
+        raise HTTPException(
+            status_code=400,
+            detail="El nombre de la carpeta no puede estar vacío.",
+        )
+
+    if datos.padre_id is not None and not database.obtener_carpeta(datos.padre_id):
+        raise HTTPException(status_code=404, detail="La carpeta padre no existe.")
+
+    carpeta_id = database.crear_carpeta(nombre, datos.padre_id)
+
+    return {
+        "id": carpeta_id,
+        "nombre": nombre,
+        "padre_id": datos.padre_id,
+    }
+
+
+@router.put("/carpetas/{carpeta_id}")
+def renombrar_carpeta_endpoint(carpeta_id: int, datos: CarpetaRenombrar):
+    if not database.obtener_carpeta(carpeta_id):
+        raise HTTPException(status_code=404, detail="Carpeta no encontrada")
+
+    nombre = datos.nombre.strip()
+
+    if not nombre:
+        raise HTTPException(status_code=400, detail="El nombre no puede estar vacío.")
+
+    database.renombrar_carpeta(carpeta_id, nombre)
+
+    return {"ok": True, "id": carpeta_id, "nombre": nombre}
+
+
+@router.delete("/carpetas/{carpeta_id}")
+def eliminar_carpeta_endpoint(carpeta_id: int):
+    """
+    Elimina una carpeta, sus subcarpetas y los archivos que contienen
+    (registro en BD + archivo físico en disco).
+    """
+    if not database.obtener_carpeta(carpeta_id):
+        raise HTTPException(status_code=404, detail="Carpeta no encontrada")
+
+    registros = database.eliminar_carpeta(carpeta_id)
+
+    archivos_borrados = 0
+
+    for registro in registros:
+        ruta = resolver_ruta_archivo(registro.get("ruta"))
+
+        if not ruta or not ruta.exists():
+            continue
+
+        try:
+            os.remove(ruta)
+            archivos_borrados += 1
+        except OSError:
+            pass
+
+    return {
+        "ok": True,
+        "archivos_eliminados": len(registros),
+        "archivos_borrados_disco": archivos_borrados,
+    }
+
+
+# ============================================================
 # ARCHIVOS SUBIDOS
 # ============================================================
 
 @router.get("/subidos")
-def listar_subidos():
-    return database.listar_archivos_subidos()
+def listar_subidos(carpeta_id: int | None = Query(None)):
+    """
+    Lista los archivos subidos dentro de una carpeta.
+    Sin carpeta_id devuelve los archivos que están en la raíz.
+    """
+    return database.listar_archivos_subidos(carpeta_id)
 
 
 @router.post("/subidos")
 async def subir_archivo(
     archivo: UploadFile = File(...),
     modulo: str | None = Form(None),
+    carpeta_id: str | None = Form(None),
 ):
     if not archivo.filename:
         raise HTTPException(
             status_code=400,
             detail="El archivo no tiene nombre.",
         )
+
+    carpeta_id_int = _parsear_carpeta_id(carpeta_id)
 
     nombre_guardado = f"{uuid.uuid4().hex[:10]}_{archivo.filename}"
     destino = UPLOADS_DIR / nombre_guardado
@@ -93,7 +251,11 @@ async def subir_archivo(
             ruta=str(destino),
             tamano_bytes=len(contenido),
             modulo=modulo,
+            carpeta_id=carpeta_id_int,
         )
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         # Si algo falla después de crear el archivo físico,
@@ -112,7 +274,23 @@ async def subir_archivo(
     return {
         "id": archivo_id,
         "nombre_original": archivo.filename,
+        "carpeta_id": carpeta_id_int,
     }
+
+
+@router.put("/subidos/{archivo_id}/mover")
+def mover_archivo_endpoint(archivo_id: int, datos: ArchivoMover):
+    registro = database.obtener_archivo_subido(archivo_id)
+
+    if not registro:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+
+    if datos.carpeta_id is not None and not database.obtener_carpeta(datos.carpeta_id):
+        raise HTTPException(status_code=404, detail="La carpeta destino no existe.")
+
+    database.mover_archivo_a_carpeta(archivo_id, datos.carpeta_id)
+
+    return {"ok": True, "id": archivo_id, "carpeta_id": datos.carpeta_id}
 
 
 @router.get("/subidos/{archivo_id}/descargar")
@@ -169,14 +347,14 @@ def eliminar_subido(archivo_id: int):
 
 
 # ============================================================
-# ELIMINAR TODOS LOS ARCHIVOS SUBIDOS
+# ELIMINAR TODOS LOS ARCHIVOS SUBIDOS (Y CARPETAS)
 # ============================================================
 
 @router.delete("/subidos")
 def eliminar_todos_subidos():
     """
-    Elimina todos los registros de archivos_subidos
-    y sus archivos físicos asociados.
+    Elimina todos los registros de archivos_subidos, todas las carpetas,
+    y los archivos físicos asociados.
     """
 
     registros = database.vaciar_archivos_subidos()
@@ -333,4 +511,3 @@ def eliminar_todos_generados():
         "registros_eliminados": len(rutas),
         "archivos_borrados": archivos_borrados,
     }
-

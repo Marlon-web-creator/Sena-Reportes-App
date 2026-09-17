@@ -4,6 +4,7 @@ database.py
 Conexión SQLite para guardar:
 - Historial de ejecuciones de los módulos.
 - Archivos subidos manualmente desde la sección "Base de Datos".
+- Carpetas y subcarpetas para organizar esos archivos.
 
 La base de datos se guarda como app.db en la raíz del proyecto.
 
@@ -49,7 +50,30 @@ def get_connection() -> sqlite3.Connection:
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Migraciones ligeras (para bases de datos ya existentes)
+# ---------------------------------------------------------------------------
+
+def _migrar_columnas_faltantes(conn: sqlite3.Connection) -> None:
+    """
+    Agrega columnas nuevas a tablas que ya existían antes de introducir
+    carpetas, sin romper instalaciones previas.
+    """
+
+    columnas = {
+        fila["name"]
+        for fila in conn.execute("PRAGMA table_info(archivos_subidos)").fetchall()
+    }
+
+    if "carpeta_id" not in columnas:
+        conn.execute(
+            "ALTER TABLE archivos_subidos ADD COLUMN carpeta_id INTEGER "
+            "REFERENCES carpetas(id)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +105,22 @@ def init_db() -> None:
     )
 
     # -----------------------------------------------------------------------
+    # Carpetas (deben crearse antes que archivos_subidos por la FK)
+    # -----------------------------------------------------------------------
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS carpetas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL,
+            padre_id INTEGER,
+            fecha_creacion TEXT NOT NULL,
+            FOREIGN KEY (padre_id) REFERENCES carpetas (id)
+        )
+        """
+    )
+
+    # -----------------------------------------------------------------------
     # Archivos subidos manualmente
     # -----------------------------------------------------------------------
 
@@ -93,10 +133,14 @@ def init_db() -> None:
             ruta TEXT NOT NULL,
             tamano_bytes INTEGER,
             modulo TEXT,
-            fecha_subida TEXT NOT NULL
+            carpeta_id INTEGER,
+            fecha_subida TEXT NOT NULL,
+            FOREIGN KEY (carpeta_id) REFERENCES carpetas (id)
         )
         """
     )
+
+    _migrar_columnas_faltantes(conn)
 
     conn.commit()
     conn.close()
@@ -289,6 +333,255 @@ def quitar_archivo_generado(
 
 
 # ---------------------------------------------------------------------------
+# Carpetas
+# ---------------------------------------------------------------------------
+
+def crear_carpeta(nombre: str, padre_id: int | None = None) -> int:
+    """
+    Crea una carpeta (opcionalmente dentro de otra) y devuelve su ID.
+    """
+
+    conn = get_connection()
+
+    cur = conn.execute(
+        """
+        INSERT INTO carpetas (nombre, padre_id, fecha_creacion)
+        VALUES (?, ?, ?)
+        """,
+        (nombre.strip(), padre_id, _ahora_bogota()),
+    )
+
+    conn.commit()
+
+    nuevo_id = cur.lastrowid
+
+    conn.close()
+
+    return nuevo_id
+
+
+def obtener_carpeta(carpeta_id: int) -> dict | None:
+    """
+    Obtiene una carpeta por su ID.
+    """
+
+    conn = get_connection()
+
+    fila = conn.execute(
+        "SELECT * FROM carpetas WHERE id = ?",
+        (carpeta_id,),
+    ).fetchone()
+
+    conn.close()
+
+    return dict(fila) if fila else None
+
+
+def listar_carpetas(padre_id: int | None = None) -> list[dict]:
+    """
+    Lista las subcarpetas directas de padre_id.
+    padre_id=None devuelve las carpetas de la raíz.
+    """
+
+    conn = get_connection()
+
+    if padre_id is None:
+        filas = conn.execute(
+            """
+            SELECT * FROM carpetas
+            WHERE padre_id IS NULL
+            ORDER BY nombre COLLATE NOCASE
+            """
+        ).fetchall()
+    else:
+        filas = conn.execute(
+            """
+            SELECT * FROM carpetas
+            WHERE padre_id = ?
+            ORDER BY nombre COLLATE NOCASE
+            """,
+            (padre_id,),
+        ).fetchall()
+
+    conn.close()
+
+    return [dict(f) for f in filas]
+
+
+def listar_todas_las_carpetas() -> list[dict]:
+    """
+    Devuelve todas las carpetas (planas, con su padre_id), útil para
+    construir un árbol completo o un selector de "mover a...".
+    """
+
+    conn = get_connection()
+
+    filas = conn.execute(
+        "SELECT * FROM carpetas ORDER BY nombre COLLATE NOCASE"
+    ).fetchall()
+
+    conn.close()
+
+    return [dict(f) for f in filas]
+
+
+def obtener_ruta_carpeta(carpeta_id: int | None) -> list[dict]:
+    """
+    Devuelve la ruta (breadcrumb) desde la raíz hasta carpeta_id,
+    como lista de {id, nombre}, empezando por la raíz.
+    """
+
+    if carpeta_id is None:
+        return []
+
+    ruta: list[dict] = []
+    actual_id: int | None = carpeta_id
+    visitados: set[int] = set()
+
+    conn = get_connection()
+
+    while actual_id is not None:
+        if actual_id in visitados:
+            break  # protección ante ciclos accidentales
+
+        visitados.add(actual_id)
+
+        fila = conn.execute(
+            "SELECT id, nombre, padre_id FROM carpetas WHERE id = ?",
+            (actual_id,),
+        ).fetchone()
+
+        if not fila:
+            break
+
+        ruta.insert(0, {"id": fila["id"], "nombre": fila["nombre"]})
+
+        actual_id = fila["padre_id"]
+
+    conn.close()
+
+    return ruta
+
+
+def renombrar_carpeta(carpeta_id: int, nuevo_nombre: str) -> None:
+    """
+    Cambia el nombre de una carpeta.
+    """
+
+    conn = get_connection()
+
+    conn.execute(
+        "UPDATE carpetas SET nombre = ? WHERE id = ?",
+        (nuevo_nombre.strip(), carpeta_id),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def _ids_descendientes(conn: sqlite3.Connection, carpeta_id: int) -> list[int]:
+    """
+    BFS: devuelve carpeta_id y los IDs de todas sus subcarpetas,
+    recursivamente.
+    """
+
+    ids = [carpeta_id]
+    pendientes = [carpeta_id]
+
+    while pendientes:
+        actual = pendientes.pop()
+
+        hijos = conn.execute(
+            "SELECT id FROM carpetas WHERE padre_id = ?",
+            (actual,),
+        ).fetchall()
+
+        for hijo in hijos:
+            ids.append(hijo["id"])
+            pendientes.append(hijo["id"])
+
+    return ids
+
+
+def contar_contenido_carpeta(carpeta_id: int) -> dict:
+    """
+    Cuenta cuántas subcarpetas y archivos hay dentro de una carpeta
+    (incluyendo subcarpetas anidadas). Útil para confirmar un borrado.
+    """
+
+    conn = get_connection()
+
+    ids = _ids_descendientes(conn, carpeta_id)
+    placeholders = ",".join("?" * len(ids))
+
+    archivos = conn.execute(
+        f"SELECT COUNT(*) AS n FROM archivos_subidos WHERE carpeta_id IN ({placeholders})",
+        ids,
+    ).fetchone()["n"]
+
+    conn.close()
+
+    return {
+        "subcarpetas": len(ids) - 1,
+        "archivos": archivos,
+    }
+
+
+def eliminar_carpeta(carpeta_id: int) -> list[dict]:
+    """
+    Elimina una carpeta, todas sus subcarpetas y los registros de
+    archivos_subidos contenidos en ellas (recursivamente).
+
+    Devuelve los registros de archivos eliminados para que el router
+    borre también los archivos físicos del disco.
+    """
+
+    conn = get_connection()
+
+    ids = _ids_descendientes(conn, carpeta_id)
+    placeholders = ",".join("?" * len(ids))
+
+    filas_archivos = conn.execute(
+        f"SELECT * FROM archivos_subidos WHERE carpeta_id IN ({placeholders})",
+        ids,
+    ).fetchall()
+
+    registros = [dict(f) for f in filas_archivos]
+
+    conn.execute(
+        f"DELETE FROM archivos_subidos WHERE carpeta_id IN ({placeholders})",
+        ids,
+    )
+
+    conn.execute(
+        f"DELETE FROM carpetas WHERE id IN ({placeholders})",
+        ids,
+    )
+
+    conn.commit()
+    conn.close()
+
+    return registros
+
+
+def mover_archivo_a_carpeta(archivo_id: int, carpeta_id: int | None) -> None:
+    """
+    Mueve un archivo subido a otra carpeta (carpeta_id=None lo manda
+    a la raíz).
+    """
+
+    conn = get_connection()
+
+    conn.execute(
+        "UPDATE archivos_subidos SET carpeta_id = ? WHERE id = ?",
+        (carpeta_id, archivo_id),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Archivos subidos
 # ---------------------------------------------------------------------------
 
@@ -298,6 +591,7 @@ def guardar_archivo_subido(
     ruta: str,
     tamano_bytes: int,
     modulo: str | None = None,
+    carpeta_id: int | None = None,
 ) -> int:
     """
     Registra un archivo subido manualmente.
@@ -315,9 +609,10 @@ def guardar_archivo_subido(
             ruta,
             tamano_bytes,
             modulo,
+            carpeta_id,
             fecha_subida
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             nombre_original,
@@ -325,6 +620,7 @@ def guardar_archivo_subido(
             ruta,
             tamano_bytes,
             modulo,
+            carpeta_id,
             _ahora_bogota(),
         ),
     )
@@ -338,21 +634,36 @@ def guardar_archivo_subido(
     return nuevo_id
 
 
-def listar_archivos_subidos() -> list[dict]:
+def listar_archivos_subidos(carpeta_id: int | None = None) -> list[dict]:
     """
-    Devuelve todos los archivos subidos, ordenados del más reciente
-    al más antiguo.
+    Devuelve los archivos subidos dentro de una carpeta, ordenados del
+    más reciente al más antiguo.
+
+    carpeta_id=None devuelve los archivos que están en la raíz
+    (sin carpeta asignada).
     """
 
     conn = get_connection()
 
-    filas = conn.execute(
-        """
-        SELECT *
-        FROM archivos_subidos
-        ORDER BY id DESC
-        """
-    ).fetchall()
+    if carpeta_id is None:
+        filas = conn.execute(
+            """
+            SELECT *
+            FROM archivos_subidos
+            WHERE carpeta_id IS NULL
+            ORDER BY id DESC
+            """
+        ).fetchall()
+    else:
+        filas = conn.execute(
+            """
+            SELECT *
+            FROM archivos_subidos
+            WHERE carpeta_id = ?
+            ORDER BY id DESC
+            """,
+            (carpeta_id,),
+        ).fetchall()
 
     conn.close()
 
@@ -415,14 +726,15 @@ def eliminar_archivo_subido(
 
 def vaciar_archivos_subidos() -> list[dict]:
     """
-    Elimina TODOS los registros de archivos_subidos.
-    Devuelve los registros eliminados para que el router pueda borrar
-    también los archivos físicos del disco.
+    Elimina TODOS los registros de archivos_subidos y TODAS las carpetas.
+    Devuelve los registros de archivos eliminados para que el router pueda
+    borrar también los archivos físicos del disco.
     """
     conn = get_connection()
 
     filas = conn.execute("SELECT * FROM archivos_subidos").fetchall()
     conn.execute("DELETE FROM archivos_subidos")
+    conn.execute("DELETE FROM carpetas")
     conn.commit()
     conn.close()
 
