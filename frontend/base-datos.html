@@ -44,6 +44,27 @@
 </nav>
 
       <section id="tab-subidos" class="db-panel active">
+
+        <!-- Ruta actual (breadcrumb) -->
+        <div id="breadcrumb-carpetas" class="db-breadcrumb"></div>
+
+        <!-- Barra de acciones de carpetas -->
+        <div class="db-carpetas-toolbar">
+          <button id="btn-nueva-carpeta" class="btn-nueva-carpeta" type="button">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                 stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+              <path d="M12 11v4" />
+              <path d="M10 13h4" />
+            </svg>
+            Nueva carpeta
+          </button>
+        </div>
+
+        <!-- Carpetas de la ubicación actual -->
+        <div id="grid-carpetas" class="db-carpetas-grid"></div>
+
         <form id="form-subir" class="upload-form">
           <input type="file" id="input-archivo" required />
           <input type="text" id="input-modulo" placeholder="Módulo (opcional)" />

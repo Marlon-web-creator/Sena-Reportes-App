@@ -2,6 +2,11 @@ const API = "/api/archivos";
 
 let pestanaActiva = "subidos";
 
+// Estado de navegación por carpetas.
+// carpetaActualId === null  →  estamos en la raíz.
+let carpetaActualId = null;
+let rutaActual = [{ id: null, nombre: "Raíz" }];
+
 /* ============================================================
    PESTAÑAS
    ============================================================ */
@@ -57,14 +62,276 @@ async function leerRespuesta(res) {
 }
 
 
+function iconoCarpeta() {
+  return `
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
+         stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+    </svg>
+  `;
+}
+
+
+function iconoNuevaCarpeta() {
+  return `
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+         stroke="currentColor" stroke-width="1.9"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+      <path d="M12 11v4" />
+      <path d="M10 13h4" />
+    </svg>
+  `;
+}
+
+
+/* ============================================================
+   CARPETAS
+   ============================================================ */
+
+async function cargarCarpetas() {
+  try {
+    const url =
+      carpetaActualId === null
+        ? `${API}/carpetas`
+        : `${API}/carpetas?padre_id=${carpetaActualId}`;
+
+    const res = await fetch(url);
+    const data = await leerRespuesta(res);
+
+    renderCarpetas(data);
+  } catch (err) {
+    console.error("Error cargando carpetas:", err);
+
+    notificar(
+      `No se pudieron cargar las carpetas: ${err.message}`,
+      "error"
+    );
+  }
+}
+
+
+function renderCarpetas(carpetas) {
+  const grid = document.getElementById("grid-carpetas");
+
+  if (!grid) return;
+
+  if (!carpetas.length) {
+    grid.innerHTML = "";
+    return;
+  }
+
+  grid.innerHTML = carpetas.map((c) => `
+    <div class="carpeta-card" data-id="${c.id}">
+      <div class="carpeta-abrir" data-id="${c.id}" data-nombre="${c.nombre}">
+        ${iconoCarpeta()}
+        <span>${c.nombre}</span>
+      </div>
+      <button
+        type="button"
+        class="btn-eliminar-carpeta"
+        data-id="${c.id}"
+        data-nombre="${c.nombre}"
+        title="Eliminar carpeta"
+      >
+        &times;
+      </button>
+    </div>
+  `).join("");
+
+  grid.querySelectorAll(".carpeta-abrir").forEach((el) => {
+    el.addEventListener("click", () => {
+      abrirCarpeta(Number(el.dataset.id), el.dataset.nombre);
+    });
+  });
+
+  grid.querySelectorAll(".btn-eliminar-carpeta").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await eliminarCarpeta(Number(btn.dataset.id), btn.dataset.nombre);
+    });
+  });
+}
+
+
+function abrirCarpeta(id, nombre) {
+  carpetaActualId = id;
+  rutaActual.push({ id, nombre });
+
+  renderBreadcrumb();
+  cargarTodo();
+}
+
+
+function renderBreadcrumb() {
+  const cont = document.getElementById("breadcrumb-carpetas");
+
+  if (!cont) return;
+
+  cont.innerHTML = rutaActual.map((c, i) => {
+    const esUltimo = i === rutaActual.length - 1;
+
+    return `
+      <span class="breadcrumb-item${esUltimo ? " activo" : ""}" data-index="${i}">
+        ${c.nombre}
+      </span>
+      ${esUltimo ? "" : '<span class="breadcrumb-sep">/</span>'}
+    `;
+  }).join("");
+
+  cont.querySelectorAll(".breadcrumb-item").forEach((el) => {
+    el.addEventListener("click", () => {
+      const i = Number(el.dataset.index);
+
+      if (i === rutaActual.length - 1) return;
+
+      rutaActual = rutaActual.slice(0, i + 1);
+      carpetaActualId = rutaActual[rutaActual.length - 1].id;
+
+      renderBreadcrumb();
+      cargarTodo();
+    });
+  });
+}
+
+
+async function crearCarpeta() {
+  const nombre = await pedirTexto({
+    titulo: "Nueva carpeta",
+    mensaje: "Nombre de la carpeta:",
+    placeholder: "Ej. Fichas 2026",
+  });
+
+  if (!nombre) return;
+
+  try {
+    const res = await fetch(`${API}/carpetas`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nombre,
+        padre_id: carpetaActualId,
+      }),
+    });
+
+    await leerRespuesta(res);
+
+    notificar("Carpeta creada", "success");
+
+    await cargarCarpetas();
+  } catch (err) {
+    console.error("Error creando carpeta:", err);
+
+    notificar(
+      `No se pudo crear la carpeta: ${err.message}`,
+      "error"
+    );
+  }
+}
+
+
+async function eliminarCarpeta(id, nombre) {
+  let mensaje = `Se eliminará la carpeta "${nombre}"`;
+
+  try {
+    const res = await fetch(`${API}/carpetas/${id}/contenido`);
+    const info = await leerRespuesta(res);
+
+    if (info.subcarpetas || info.archivos) {
+      mensaje +=
+        `, junto con ${info.subcarpetas} subcarpeta(s) y ` +
+        `${info.archivos} archivo(s) que contiene`;
+    }
+  } catch (err) {
+    console.warn("No se pudo obtener el contenido de la carpeta:", err);
+  }
+
+  mensaje += ". Esta acción no se puede deshacer.";
+
+  const ok = await confirmar({
+    titulo: "¿Eliminar carpeta?",
+    mensaje,
+    textoConfirmar: "Eliminar",
+    peligro: true,
+  });
+
+  if (!ok) return;
+
+  try {
+    const res = await fetch(`${API}/carpetas/${id}`, {
+      method: "DELETE",
+    });
+
+    await leerRespuesta(res);
+
+    notificar("Carpeta eliminada", "success");
+
+    await cargarTodo();
+  } catch (err) {
+    console.error("Error eliminando carpeta:", err);
+
+    notificar(
+      `No se pudo eliminar la carpeta: ${err.message}`,
+      "error"
+    );
+  }
+}
+
+
+/**
+ * Construye las opciones para el selector "mover a..." de cada archivo,
+ * a partir del árbol completo de carpetas, con sangría según profundidad.
+ */
+async function obtenerOpcionesCarpetas() {
+  const res = await fetch(`${API}/carpetas/arbol`);
+  const carpetas = await leerRespuesta(res);
+
+  const porPadre = {};
+
+  carpetas.forEach((c) => {
+    const clave = c.padre_id ?? "raiz";
+    if (!porPadre[clave]) porPadre[clave] = [];
+    porPadre[clave].push(c);
+  });
+
+  const opciones = [{ id: "", etiqueta: "Raíz" }];
+
+  function recorrer(clavePadre, profundidad) {
+    (porPadre[clavePadre] || [])
+      .slice()
+      .sort((a, b) => a.nombre.localeCompare(b.nombre))
+      .forEach((c) => {
+        opciones.push({
+          id: c.id,
+          etiqueta: `${"—".repeat(profundidad)} ${c.nombre}`.trim(),
+        });
+
+        recorrer(c.id, profundidad + 1);
+      });
+  }
+
+  recorrer("raiz", 1);
+
+  return opciones;
+}
+
+
 /* ============================================================
    ARCHIVOS SUBIDOS
    ============================================================ */
 
 async function cargarSubidos() {
   try {
-    const res = await fetch(`${API}/subidos`);
+    const url =
+      carpetaActualId === null
+        ? `${API}/subidos`
+        : `${API}/subidos?carpeta_id=${carpetaActualId}`;
+
+    const res = await fetch(url);
     const data = await leerRespuesta(res);
+
+    const opciones = await obtenerOpcionesCarpetas();
 
     const tbody = document.getElementById("tabla-subidos");
 
@@ -75,6 +342,17 @@ async function cargarSubidos() {
         <td>${formatBytes(f.tamano_bytes)}</td>
         <td>${f.fecha_subida}</td>
         <td>
+          <select class="select-mover-archivo" data-id="${f.id}" title="Mover a...">
+            ${opciones.map((o) => `
+              <option
+                value="${o.id}"
+                ${String(o.id) === String(f.carpeta_id ?? "") ? "selected" : ""}
+              >
+                ${o.etiqueta}
+              </option>
+            `).join("")}
+          </select>
+
           <a href="${API}/subidos/${f.id}/descargar">
             Descargar
           </a>
@@ -89,6 +367,12 @@ async function cargarSubidos() {
         </td>
       </tr>
     `).join("");
+
+    tbody.querySelectorAll(".select-mover-archivo").forEach((sel) => {
+      sel.addEventListener("change", () => {
+        moverArchivo(Number(sel.dataset.id), sel.value);
+      });
+    });
 
     tbody.querySelectorAll(".btn-eliminar-subido").forEach((btn) => {
       btn.addEventListener("click", async () => {
@@ -143,6 +427,32 @@ async function cargarSubidos() {
 
     notificar(
       `No se pudieron cargar los archivos: ${err.message}`,
+      "error"
+    );
+  }
+}
+
+
+async function moverArchivo(archivoId, carpetaIdValor) {
+  const carpetaId = carpetaIdValor === "" ? null : Number(carpetaIdValor);
+
+  try {
+    const res = await fetch(`${API}/subidos/${archivoId}/mover`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ carpeta_id: carpetaId }),
+    });
+
+    await leerRespuesta(res);
+
+    notificar("Archivo movido", "success");
+
+    await cargarSubidos();
+  } catch (err) {
+    console.error("Error moviendo archivo:", err);
+
+    notificar(
+      `No se pudo mover el archivo: ${err.message}`,
       "error"
     );
   }
@@ -266,7 +576,7 @@ document
     const esSubidos = pestanaActiva === "subidos";
 
     const etiqueta = esSubidos
-      ? "archivos subidos"
+      ? "archivos y carpetas subidos"
       : "archivos generados";
 
 
@@ -316,7 +626,7 @@ document
        *
        * No usamos IDs aquí.
        *
-       * Archivos subidos:
+       * Archivos subidos (y carpetas):
        *     DELETE /api/archivos/subidos
        *
        * Archivos generados:
@@ -356,7 +666,11 @@ document
 
 
       if (esSubidos) {
-        await cargarSubidos();
+        carpetaActualId = null;
+        rutaActual = [{ id: null, nombre: "Raíz" }];
+        renderBreadcrumb();
+
+        await cargarTodo();
       } else {
         await cargarGenerados();
       }
@@ -423,6 +737,14 @@ document
       );
     }
 
+    // El archivo se sube dentro de la carpeta donde estamos parados.
+    if (carpetaActualId !== null) {
+      fd.append(
+        "carpeta_id",
+        carpetaActualId
+      );
+    }
+
 
     try {
 
@@ -465,8 +787,27 @@ document
 
 
 /* ============================================================
+   BOTÓN "NUEVA CARPETA"
+   ============================================================ */
+
+const btnNuevaCarpeta = document.getElementById("btn-nueva-carpeta");
+
+if (btnNuevaCarpeta) {
+  btnNuevaCarpeta.addEventListener("click", crearCarpeta);
+}
+
+
+/* ============================================================
    INICIALIZACIÓN
    ============================================================ */
 
-cargarSubidos();
+async function cargarTodo() {
+  await Promise.all([
+    cargarCarpetas(),
+    cargarSubidos(),
+  ]);
+}
+
+renderBreadcrumb();
+cargarTodo();
 cargarGenerados();

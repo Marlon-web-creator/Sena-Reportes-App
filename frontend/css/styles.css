@@ -817,3 +817,232 @@ a { color: var(--accent); }
   from { opacity: 0; transform: translateY(8px) scale(0.98); }
   to   { opacity: 1; transform: translateY(0)    scale(1); }
 }
+
+/* ---------- breadcrumb de carpetas ---------- */
+
+.db-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 16px;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+.breadcrumb-item {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 5px 9px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.breadcrumb-item:hover {
+  background: var(--panel-raised);
+  color: var(--accent);
+}
+.breadcrumb-item.activo {
+  color: var(--text);
+  font-weight: 600;
+  cursor: default;
+}
+.breadcrumb-item.activo:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+.breadcrumb-sep {
+  color: var(--text-faint);
+  user-select: none;
+  padding: 0 2px;
+}
+
+/* ---------- toolbar de carpetas ---------- */
+
+.db-carpetas-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.btn-nueva-carpeta {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.btn-nueva-carpeta:hover {
+  background: var(--panel);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.btn-nueva-carpeta:active { transform: translateY(1px); }
+.btn-nueva-carpeta:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn-nueva-carpeta svg {
+  width: 16px;
+  height: 16px;
+  color: currentColor;
+  flex-shrink: 0;
+}
+
+/* ---------- grid de carpetas ---------- */
+
+.db-carpetas-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.db-carpetas-grid:empty { display: none; margin-bottom: 0; }
+
+.carpeta-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--bg-well);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.87rem;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.carpeta-card:hover {
+  background: var(--panel-raised);
+  border-color: var(--border-strong);
+}
+
+.carpeta-abrir {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.carpeta-abrir svg {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.carpeta-abrir .nombre {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn-eliminar-carpeta {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease,
+              background 0.15s ease, border-color 0.15s ease;
+}
+.carpeta-card:hover .btn-eliminar-carpeta,
+.btn-eliminar-carpeta:focus-visible { opacity: 1; }
+.btn-eliminar-carpeta:hover {
+  color: var(--red);
+  background: var(--red-dim);
+  border-color: transparent;
+}
+.btn-eliminar-carpeta svg {
+  width: 15px;
+  height: 15px;
+  color: currentColor;
+}
+
+/* ---------- selector "mover archivo" en la tabla ---------- */
+
+.select-mover-archivo {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 32px;
+  padding: 0 30px 0 10px;
+  background-color: var(--bg-well);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1L5 5L9 1' stroke='%238ea38f' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease,
+              box-shadow 0.15s ease;
+}
+.select-mover-archivo:hover {
+  border-color: var(--border-strong);
+  background-color: var(--panel-raised);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1L5 5L9 1' stroke='%2339a900' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+.select-mover-archivo:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+/* ---------- input dentro del modal (nueva carpeta / rename) ---------- */
+
+.modal-input {
+  width: 100%;
+  height: 42px;
+  padding: 0 12px;
+  margin-bottom: 20px;
+  background: var(--bg-well);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.15s ease, background 0.15s ease,
+              box-shadow 0.15s ease;
+}
+.modal-input::placeholder { color: var(--text-faint); }
+.modal-input:hover {
+  border-color: var(--border-strong);
+  background: var(--panel-raised);
+}
+.modal-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
