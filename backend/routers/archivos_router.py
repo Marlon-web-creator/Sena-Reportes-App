@@ -22,6 +22,25 @@ UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def resolver_ruta_archivo(ruta: str | None) -> Path | None:
+    if not ruta:
+        return None
+
+    ruta_actual = Path(ruta)
+    if ruta_actual.exists():
+        return ruta_actual
+
+    ruta_normalizada = str(ruta).replace("\\", "/")
+    marcador = "/storage/"
+    posicion = ruta_normalizada.lower().find(marcador)
+
+    if posicion >= 0:
+        ruta_relativa = ruta_normalizada[posicion + 1 :]
+        return BASE_DIR / Path(*ruta_relativa.split("/"))
+
+    return ruta_actual
+
+
 # ============================================================
 # DIAGNÓSTICO
 # ============================================================
@@ -106,9 +125,9 @@ def descargar_subido(archivo_id: int):
             detail="Archivo no encontrado",
         )
 
-    ruta = registro.get("ruta")
+    ruta = resolver_ruta_archivo(registro.get("ruta"))
 
-    if not ruta or not os.path.exists(ruta):
+    if not ruta or not ruta.exists():
         raise HTTPException(
             status_code=404,
             detail="Archivo físico no encontrado",
@@ -130,9 +149,9 @@ def eliminar_subido(archivo_id: int):
             detail="Archivo no encontrado",
         )
 
-    ruta = registro.get("ruta")
+    ruta = resolver_ruta_archivo(registro.get("ruta"))
 
-    if ruta and os.path.exists(ruta):
+    if ruta and ruta.exists():
         try:
             os.remove(ruta)
         except OSError as e:
@@ -165,9 +184,9 @@ def eliminar_todos_subidos():
     archivos_borrados = 0
 
     for registro in registros:
-        ruta = registro.get("ruta")
+        ruta = resolver_ruta_archivo(registro.get("ruta"))
 
-        if not ruta or not os.path.exists(ruta):
+        if not ruta or not ruta.exists():
             continue
 
         try:
@@ -207,7 +226,9 @@ def listar_generados():
                     "clave": clave,
                     "ruta": ruta,
                     "nombre_archivo": os.path.basename(ruta),
-                    "existe": os.path.exists(ruta),
+                    "existe": resolver_ruta_archivo(ruta).exists()
+                    if resolver_ruta_archivo(ruta)
+                    else False,
                 }
             )
 
@@ -228,9 +249,9 @@ def descargar_generado(
         )
 
     archivos_generados = ejecucion.get("archivos_generados") or {}
-    ruta = archivos_generados.get(clave)
+    ruta = resolver_ruta_archivo(archivos_generados.get(clave))
 
-    if not ruta or not os.path.exists(ruta):
+    if not ruta or not ruta.exists():
         raise HTTPException(
             status_code=404,
             detail="Archivo no encontrado",
@@ -256,9 +277,9 @@ def eliminar_generado(
         )
 
     archivos_generados = ejecucion.get("archivos_generados") or {}
-    ruta = archivos_generados.get(clave)
+    ruta = resolver_ruta_archivo(archivos_generados.get(clave))
 
-    if ruta and os.path.exists(ruta):
+    if ruta and ruta.exists():
         try:
             os.remove(ruta)
         except OSError as e:
@@ -295,11 +316,13 @@ def eliminar_todos_generados():
     archivos_borrados = 0
 
     for ruta in rutas:
-        if not ruta or not os.path.exists(ruta):
+        ruta_resuelta = resolver_ruta_archivo(ruta)
+
+        if not ruta_resuelta or not ruta_resuelta.exists():
             continue
 
         try:
-            os.remove(ruta)
+            ruta_resuelta.unlink()
             archivos_borrados += 1
         except OSError:
             # Continuamos con los demás archivos.
