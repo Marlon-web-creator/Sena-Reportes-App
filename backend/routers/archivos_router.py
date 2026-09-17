@@ -1,45 +1,18 @@
 import os
 import uuid
-from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 import database
+import supabase_storage
 
 
 router = APIRouter(
     prefix="/api/archivos",
     tags=["archivos"],
 )
-
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-UPLOADS_DIR = BASE_DIR / "storage" / "uploads"
-OUTPUTS_DIR = BASE_DIR / "storage" / "outputs"
-
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def resolver_ruta_archivo(ruta: str | None) -> Path | None:
-    if not ruta:
-        return None
-
-    ruta_actual = Path(ruta)
-    if ruta_actual.exists():
-        return ruta_actual
-
-    ruta_normalizada = str(ruta).replace("\\", "/")
-    marcador = "/storage/"
-    posicion = ruta_normalizada.lower().find(marcador)
-
-    if posicion >= 0:
-        ruta_relativa = ruta_normalizada[posicion + 1 :]
-        return BASE_DIR / Path(*ruta_relativa.split("/"))
-
-    return ruta_actual
 
 
 def _parsear_carpeta_id(valor: str | None) -> int | None:
@@ -59,6 +32,26 @@ def _parsear_carpeta_id(valor: str | None) -> int | None:
         raise HTTPException(status_code=404, detail="La carpeta indicada no existe.")
 
     return carpeta_id
+
+
+def _redirigir_a_url_firmada(ruta_storage: str, nombre_descarga: str | None = None) -> RedirectResponse:
+    """
+    Genera una URL firmada temporal para el archivo y redirige a ella.
+    Se usa en todos los endpoints de "descargar" en vez de servir el
+    archivo directamente desde el servidor.
+    """
+    if not ruta_storage or not supabase_storage.existe_archivo(ruta_storage):
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+
+    url = supabase_storage.crear_url_firmada(ruta_storage, nombre_descarga=nombre_descarga)
+
+    if not url:
+        raise HTTPException(
+            status_code=500,
+            detail="No se pudo generar el enlace de descarga.",
+        )
+
+    return RedirectResponse(url)
 
 
 # ============================================================
@@ -183,7 +176,7 @@ def renombrar_carpeta_endpoint(carpeta_id: int, datos: CarpetaRenombrar):
 def eliminar_carpeta_endpoint(carpeta_id: int):
     """
     Elimina una carpeta, sus subcarpetas y los archivos que contienen
-    (registro en BD + archivo físico en disco).
+    (registro en BD + archivo físico en Supabase Storage).
     """
     if not database.obtener_carpeta(carpeta_id):
         raise HTTPException(status_code=404, detail="Carpeta no encontrada")
@@ -193,16 +186,8 @@ def eliminar_carpeta_endpoint(carpeta_id: int):
     archivos_borrados = 0
 
     for registro in registros:
-        ruta = resolver_ruta_archivo(registro.get("ruta"))
-
-        if not ruta or not ruta.exists():
-            continue
-
-        try:
-            os.remove(ruta)
+        if supabase_storage.eliminar_archivo(registro.get("ruta")):
             archivos_borrados += 1
-        except OSError:
-            pass
 
     return {
         "ok": True,
@@ -239,16 +224,21 @@ async def subir_archivo(
     carpeta_id_int = _parsear_carpeta_id(carpeta_id)
 
     nombre_guardado = f"{uuid.uuid4().hex[:10]}_{archivo.filename}"
-    destino = UPLOADS_DIR / nombre_guardado
+    ruta_storage = f"uploads/{nombre_guardado}"
 
     try:
         contenido = await archivo.read()
-        destino.write_bytes(contenido)
+
+        supabase_storage.subir_bytes(
+            ruta_storage,
+            contenido,
+            content_type=archivo.content_type,
+        )
 
         archivo_id = database.guardar_archivo_subido(
             nombre_original=archivo.filename,
             nombre_guardado=nombre_guardado,
-            ruta=str(destino),
+            ruta=ruta_storage,
             tamano_bytes=len(contenido),
             modulo=modulo,
             carpeta_id=carpeta_id_int,
@@ -258,13 +248,9 @@ async def subir_archivo(
         raise
 
     except Exception as e:
-        # Si algo falla después de crear el archivo físico,
-        # intentamos limpiarlo.
-        if destino.exists():
-            try:
-                destino.unlink()
-            except OSError:
-                pass
+        # Si algo falla después de subir el archivo a Storage,
+        # intentamos limpiarlo para no dejar huérfanos.
+        supabase_storage.eliminar_archivo(ruta_storage)
 
         raise HTTPException(
             status_code=500,
@@ -303,17 +289,9 @@ def descargar_subido(archivo_id: int):
             detail="Archivo no encontrado",
         )
 
-    ruta = resolver_ruta_archivo(registro.get("ruta"))
-
-    if not ruta or not ruta.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Archivo físico no encontrado",
-        )
-
-    return FileResponse(
-        ruta,
-        filename=registro["nombre_original"],
+    return _redirigir_a_url_firmada(
+        registro.get("ruta"),
+        nombre_descarga=registro.get("nombre_original"),
     )
 
 
@@ -327,15 +305,13 @@ def eliminar_subido(archivo_id: int):
             detail="Archivo no encontrado",
         )
 
-    ruta = resolver_ruta_archivo(registro.get("ruta"))
+    ruta = registro.get("ruta")
 
-    if ruta and ruta.exists():
-        try:
-            os.remove(ruta)
-        except OSError as e:
+    if ruta and supabase_storage.existe_archivo(ruta):
+        if not supabase_storage.eliminar_archivo(ruta):
             raise HTTPException(
                 status_code=500,
-                detail=f"No se pudo eliminar el archivo físico: {e}",
+                detail="No se pudo eliminar el archivo físico en Supabase Storage.",
             )
 
     database.eliminar_archivo_subido(archivo_id)
@@ -354,26 +330,15 @@ def eliminar_subido(archivo_id: int):
 def eliminar_todos_subidos():
     """
     Elimina todos los registros de archivos_subidos, todas las carpetas,
-    y los archivos físicos asociados.
+    y los archivos físicos asociados en Supabase Storage.
     """
-
     registros = database.vaciar_archivos_subidos()
 
     archivos_borrados = 0
 
     for registro in registros:
-        ruta = resolver_ruta_archivo(registro.get("ruta"))
-
-        if not ruta or not ruta.exists():
-            continue
-
-        try:
-            os.remove(ruta)
+        if supabase_storage.eliminar_archivo(registro.get("ruta")):
             archivos_borrados += 1
-        except OSError:
-            # Un archivo que no se pueda borrar no debe impedir
-            # que se eliminen los demás registros.
-            pass
 
     return {
         "ok": True,
@@ -404,9 +369,7 @@ def listar_generados():
                     "clave": clave,
                     "ruta": ruta,
                     "nombre_archivo": os.path.basename(ruta),
-                    "existe": resolver_ruta_archivo(ruta).exists()
-                    if resolver_ruta_archivo(ruta)
-                    else False,
+                    "existe": supabase_storage.existe_archivo(ruta),
                 }
             )
 
@@ -414,10 +377,7 @@ def listar_generados():
 
 
 @router.get("/generados/{ejecucion_id}/{clave}/descargar")
-def descargar_generado(
-    ejecucion_id: int,
-    clave: str,
-):
+def descargar_generado(ejecucion_id: int, clave: str):
     ejecucion = database.obtener_ejecucion(ejecucion_id)
 
     if not ejecucion:
@@ -427,25 +387,13 @@ def descargar_generado(
         )
 
     archivos_generados = ejecucion.get("archivos_generados") or {}
-    ruta = resolver_ruta_archivo(archivos_generados.get(clave))
+    ruta = archivos_generados.get(clave)
 
-    if not ruta or not ruta.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Archivo no encontrado",
-        )
-
-    return FileResponse(
-        ruta,
-        filename=os.path.basename(ruta),
-    )
+    return _redirigir_a_url_firmada(ruta, nombre_descarga=os.path.basename(ruta) if ruta else None)
 
 
 @router.delete("/generados/{ejecucion_id}/{clave}")
-def eliminar_generado(
-    ejecucion_id: int,
-    clave: str,
-):
+def eliminar_generado(ejecucion_id: int, clave: str):
     ejecucion = database.obtener_ejecucion(ejecucion_id)
 
     if not ejecucion:
@@ -455,21 +403,16 @@ def eliminar_generado(
         )
 
     archivos_generados = ejecucion.get("archivos_generados") or {}
-    ruta = resolver_ruta_archivo(archivos_generados.get(clave))
+    ruta = archivos_generados.get(clave)
 
-    if ruta and ruta.exists():
-        try:
-            os.remove(ruta)
-        except OSError as e:
+    if ruta and supabase_storage.existe_archivo(ruta):
+        if not supabase_storage.eliminar_archivo(ruta):
             raise HTTPException(
                 status_code=500,
-                detail=f"No se pudo eliminar el archivo físico: {e}",
+                detail="No se pudo eliminar el archivo físico en Supabase Storage.",
             )
 
-    database.quitar_archivo_generado(
-        ejecucion_id,
-        clave,
-    )
+    database.quitar_archivo_generado(ejecucion_id, clave)
 
     return {
         "ok": True,
@@ -485,26 +428,16 @@ def eliminar_generado(
 @router.delete("/generados")
 def eliminar_todos_generados():
     """
-    Elimina todos los archivos generados físicamente
+    Elimina todos los archivos generados físicamente (en Supabase Storage)
     y limpia su registro en la base de datos.
     """
-
     rutas = database.vaciar_archivos_generados()
 
     archivos_borrados = 0
 
     for ruta in rutas:
-        ruta_resuelta = resolver_ruta_archivo(ruta)
-
-        if not ruta_resuelta or not ruta_resuelta.exists():
-            continue
-
-        try:
-            ruta_resuelta.unlink()
+        if supabase_storage.eliminar_archivo(ruta):
             archivos_borrados += 1
-        except OSError:
-            # Continuamos con los demás archivos.
-            pass
 
     return {
         "ok": True,
