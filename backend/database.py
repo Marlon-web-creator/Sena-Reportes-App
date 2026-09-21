@@ -651,8 +651,6 @@ def listar_archivos_subidos(carpeta_id: int | None = None) -> list[dict]:
 
     return [dict(fila) for fila in filas]
 
-
-def listar_archivos_por_modulo(modulo: str) -> list[dict]:
     """
     Devuelve TODOS los archivos subidos etiquetados con un módulo
     específico (ej. "no_programados"), sin importar en qué carpeta
@@ -674,7 +672,30 @@ def listar_archivos_por_modulo(modulo: str) -> list[dict]:
         conn.close()
 
     return [dict(f) for f in filas]
+def listar_archivos_por_modulo(modulo: str) -> list[dict]:
+    """
+    Devuelve TODOS los archivos subidos etiquetados con un módulo
+    específico, sin importar mayúsculas, espacios o guiones.
 
+    Así 'No Programados', 'no programados', 'NO_PROGRAMADOS' y
+    'no_programados' se tratan como el mismo módulo.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT * FROM archivos_subidos
+                WHERE LOWER(REPLACE(REPLACE(modulo, ' ', '_'), '-', '_')) = LOWER(%s)
+                ORDER BY id
+                """,
+                (modulo,),
+            )
+            filas = cur.fetchall()
+    finally:
+        conn.close()
+
+    return [dict(f) for f in filas]
 
 def obtener_archivo_subido(archivo_id: int) -> dict | None:
     """
