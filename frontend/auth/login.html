@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SENA · Acceso a Base de Datos</title>
+    <link rel="stylesheet" href="../css/styles.css" />
+    <style>
+      .login-wrap {
+        max-width: 380px;
+        margin: 15vh auto;
+        padding: 2rem;
+        background: #fff;
+        border-radius: 10px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      .login-wrap h1 { margin: 0 0 .5rem; }
+      .login-wrap p  { margin: 0 0 1.25rem; color: #666; }
+      .login-wrap input {
+        width: 100%;
+        padding: .7rem .9rem;
+        margin-bottom: 1rem;
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        font-size: 1rem;
+        box-sizing: border-box;
+      }
+      .login-wrap button {
+        width: 100%;
+        padding: .75rem;
+        border: none;
+        border-radius: 6px;
+        background: #39a900;   /* verde SENA */
+        color: #fff;
+        font-size: 1rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .login-wrap button:hover { background: #2f8d00; }
+      .login-wrap button:disabled { opacity: .6; cursor: not-allowed; }
+      #error { color: #c00; margin-top: 1rem; min-height: 1.2em; font-size: .9rem; }
+    </style>
+  </head>
+  <body>
+    <main class="login-wrap">
+      <h1>Base de Datos</h1>
+      <p>Ingresa la contraseña para continuar.</p>
+
+      <form id="form-login">
+        <input
+          type="password"
+          id="password"
+          placeholder="Contraseña"
+          autocomplete="current-password"
+          required
+        />
+        <button type="submit">Entrar</button>
+      </form>
+
+      <p id="error"></p>
+    </main>
+
+    <script>
+      // Si ya hay sesión, salta directo a base-datos.html
+      fetch("/api/auth/me", { credentials: "include" }).then((r) => {
+        if (r.ok) location.replace("../base-datos.html");
+      });
+
+      const form = document.getElementById("form-login");
+      const err  = document.getElementById("error");
+      const btn  = form.querySelector("button");
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        err.textContent = "";
+        btn.disabled = true;
+
+        try {
+          const res = await fetch("/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+              password: document.getElementById("password").value,
+            }),
+          });
+
+          if (res.ok) {
+            location.href = "../base-datos.html";
+            return;
+          }
+
+          const data = await res.json().catch(() => ({}));
+          err.textContent = data.detail || "Contraseña incorrecta";
+        } catch (ex) {
+          err.textContent = "No se pudo conectar con el servidor.";
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

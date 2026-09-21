@@ -25,9 +25,7 @@ document.querySelectorAll(".db-tab").forEach((btn) => {
 
     pestanaActiva = btn.dataset.tab;
 
-    document
-      .getElementById(`tab-${pestanaActiva}`)
-      .classList.add("active");
+    document.getElementById(`tab-${pestanaActiva}`).classList.add("active");
   });
 });
 
@@ -97,7 +95,7 @@ async function cargarCarpetas() {
         ? `${API}/carpetas`
         : `${API}/carpetas?padre_id=${carpetaActualId}`;
 
-    const res = await fetch(url);
+    const res = await apiFetch(url);
     const data = await leerRespuesta(res);
 
     renderCarpetas(data);
@@ -124,15 +122,15 @@ function renderCarpetas(carpetas) {
 
   grid.innerHTML = carpetas.map((c) => `
     <div class="carpeta-card" data-id="${c.id}">
-      <div class="carpeta-abrir" data-id="${c.id}" data-nombre="${c.nombre}">
+      <div class="carpeta-abrir" data-id="${c.id}" data-nombre="${esc(c.nombre)}">
         ${iconoCarpeta()}
-        <span>${c.nombre}</span>
+        <span>${esc(c.nombre)}</span>
       </div>
       <button
         type="button"
         class="btn-eliminar-carpeta"
         data-id="${c.id}"
-        data-nombre="${c.nombre}"
+        data-nombre="${esc(c.nombre)}"
         title="Eliminar carpeta"
       >
         &times;
@@ -174,7 +172,7 @@ function renderBreadcrumb() {
 
     return `
       <span class="breadcrumb-item${esUltimo ? " activo" : ""}" data-index="${i}">
-        ${c.nombre}
+        ${esc(c.nombre)}
       </span>
       ${esUltimo ? "" : '<span class="breadcrumb-sep">/</span>'}
     `;
@@ -206,7 +204,7 @@ async function crearCarpeta() {
   if (!nombre) return;
 
   try {
-    const res = await fetch(`${API}/carpetas`, {
+    const res = await apiFetch(`${API}/carpetas`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -235,7 +233,7 @@ async function eliminarCarpeta(id, nombre) {
   let mensaje = `Se eliminará la carpeta "${nombre}"`;
 
   try {
-    const res = await fetch(`${API}/carpetas/${id}/contenido`);
+    const res = await apiFetch(`${API}/carpetas/${id}/contenido`);
     const info = await leerRespuesta(res);
 
     if (info.subcarpetas || info.archivos) {
@@ -259,7 +257,7 @@ async function eliminarCarpeta(id, nombre) {
   if (!ok) return;
 
   try {
-    const res = await fetch(`${API}/carpetas/${id}`, {
+    const res = await apiFetch(`${API}/carpetas/${id}`, {
       method: "DELETE",
     });
 
@@ -284,7 +282,7 @@ async function eliminarCarpeta(id, nombre) {
  * a partir del árbol completo de carpetas, con sangría según profundidad.
  */
 async function obtenerOpcionesCarpetas() {
-  const res = await fetch(`${API}/carpetas/arbol`);
+  const res = await apiFetch(`${API}/carpetas/arbol`);
   const carpetas = await leerRespuesta(res);
 
   const porPadre = {};
@@ -328,7 +326,7 @@ async function cargarSubidos() {
         ? `${API}/subidos`
         : `${API}/subidos?carpeta_id=${carpetaActualId}`;
 
-    const res = await fetch(url);
+    const res = await apiFetch(url);
     const data = await leerRespuesta(res);
 
     const opciones = await obtenerOpcionesCarpetas();
@@ -337,10 +335,10 @@ async function cargarSubidos() {
 
     tbody.innerHTML = data.map((f) => `
       <tr>
-        <td>${f.nombre_original}</td>
-        <td>${f.modulo || "-"}</td>
+        <td>${esc(f.nombre_original)}</td>
+        <td>${esc(f.modulo || "-")}</td>
         <td>${formatBytes(f.tamano_bytes)}</td>
-        <td>${f.fecha_subida}</td>
+        <td>${esc(f.fecha_subida)}</td>
         <td>
           <select class="select-mover-archivo" data-id="${f.id}" title="Mover a...">
             ${opciones.map((o) => `
@@ -348,7 +346,7 @@ async function cargarSubidos() {
                 value="${o.id}"
                 ${String(o.id) === String(f.carpeta_id ?? "") ? "selected" : ""}
               >
-                ${o.etiqueta}
+                ${esc(o.etiqueta)}
               </option>
             `).join("")}
           </select>
@@ -389,7 +387,7 @@ async function cargarSubidos() {
         if (!ok) return;
 
         try {
-          const res = await fetch(
+          const res = await apiFetch(
             `${API}/subidos/${btn.dataset.id}`,
             {
               method: "DELETE",
@@ -437,7 +435,7 @@ async function moverArchivo(archivoId, carpetaIdValor) {
   const carpetaId = carpetaIdValor === "" ? null : Number(carpetaIdValor);
 
   try {
-    const res = await fetch(`${API}/subidos/${archivoId}/mover`, {
+    const res = await apiFetch(`${API}/subidos/${archivoId}/mover`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ carpeta_id: carpetaId }),
@@ -465,16 +463,16 @@ async function moverArchivo(archivoId, carpetaIdValor) {
 
 async function cargarGenerados() {
   try {
-    const res = await fetch(`${API}/generados`);
+    const res = await apiFetch(`${API}/generados`);
     const data = await leerRespuesta(res);
 
     const tbody = document.getElementById("tabla-generados");
 
     tbody.innerHTML = data.map((f) => `
       <tr>
-        <td>${f.modulo}</td>
-        <td>${f.nombre_archivo}</td>
-        <td>${f.fecha}</td>
+        <td>${esc(f.modulo)}</td>
+        <td>${esc(f.nombre_archivo)}</td>
+        <td>${esc(f.fecha)}</td>
         <td>
           ${f.existe ? "Disponible" : "No encontrado"}
         </td>
@@ -493,7 +491,7 @@ async function cargarGenerados() {
           <button
             type="button"
             data-ejecucion="${f.ejecucion_id}"
-            data-clave="${f.clave}"
+            data-clave="${esc(f.clave)}"
             class="btn-eliminar-generado"
           >
             Eliminar
@@ -521,7 +519,7 @@ async function cargarGenerados() {
           if (!ok) return;
 
           try {
-            const res = await fetch(
+            const res = await apiFetch(
               `${API}/generados/${btn.dataset.ejecucion}/${btn.dataset.clave}`,
               {
                 method: "DELETE",
@@ -620,50 +618,31 @@ document
 
 
     try {
-
-      /*
-       * IMPORTANTE:
-       *
-       * No usamos IDs aquí.
-       *
-       * Archivos subidos (y carpetas):
-       *     DELETE /api/archivos/subidos
-       *
-       * Archivos generados:
-       *     DELETE /api/archivos/generados
-       */
-
       const url = esSubidos
         ? `${API}/subidos`
         : `${API}/generados`;
-
 
       console.log(
         ">>> Eliminación masiva:",
         url
       );
 
-
-      const res = await fetch(url, {
+      const res = await apiFetch(url, {
         method: "DELETE",
       });
 
-
       const data = await leerRespuesta(res);
-
 
       console.log(
         ">>> Respuesta eliminación masiva:",
         data
       );
 
-
       notificar(
         `Eliminados: ${data.registros_eliminados} registro(s), ` +
         `${data.archivos_borrados} archivo(s) del disco`,
         "success"
       );
-
 
       if (esSubidos) {
         carpetaActualId = null;
@@ -674,7 +653,6 @@ document
       } else {
         await cargarGenerados();
       }
-
 
     } catch (err) {
 
@@ -726,8 +704,6 @@ document
 
     const fd = new FormData();
 
-    // El backend espera la MISMA clave "archivos" repetida una vez
-    // por cada archivo (así FastAPI la mapea a list[UploadFile]).
     for (const archivo of archivos) {
       fd.append("archivos", archivo);
     }
@@ -736,7 +712,6 @@ document
       fd.append("modulo", modulo);
     }
 
-    // El archivo se sube dentro de la carpeta donde estamos parados.
     if (carpetaActualId !== null) {
       fd.append("carpeta_id", carpetaActualId);
     }
@@ -751,7 +726,7 @@ document
 
     try {
 
-      const res = await fetch(
+      const res = await apiFetch(
         `${API}/subidos`,
         {
           method: "POST",
@@ -762,12 +737,6 @@ document
 
       const data = await leerRespuesta(res);
 
-
-      // data tiene la forma:
-      // {
-      //   total, total_subidos, total_fallidos,
-      //   subidos: [...], fallidos: [...]
-      // }
 
       if (data.total_fallidos > 0) {
 
@@ -815,6 +784,7 @@ document
 
     }
   });
+
 
 /* ============================================================
    BOTÓN "NUEVA CARPETA"

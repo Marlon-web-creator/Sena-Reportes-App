@@ -3,9 +3,11 @@ import re
 import unicodedata
 import uuid
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query, Depends
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+
+from auth.security import requiere_auth
 
 import database
 import supabase_storage
@@ -46,20 +48,15 @@ def _sanear_nombre(nombre: str) -> str:
     upload a Storage. Aquí se limpian sin tocar el nombre original que
     se guarda en la base de datos.
     """
-    # 1) Quitar acentos y diacríticos (á -> a, ñ -> n, ü -> u, …)
     nombre = unicodedata.normalize("NFKD", nombre)
     nombre = "".join(c for c in nombre if not unicodedata.combining(c))
 
-    # 2) Espacios -> guion bajo
     nombre = nombre.replace(" ", "_")
 
-    # 3) Todo lo que no sea letra, número, punto, guion o guion bajo -> "_"
     nombre = re.sub(r"[^A-Za-z0-9._-]+", "_", nombre)
 
-    # 4) Colapsar guiones bajos repetidos y limpiar bordes
     nombre = re.sub(r"_+", "_", nombre).strip("._")
 
-    # 5) Limitar longitud (dejando espacio para el prefijo uuid)
     if len(nombre) > 80:
         raiz, _, ext = nombre.rpartition(".")
         nombre = f"{raiz[:75]}.{ext}" if ext else nombre[:80]
@@ -70,8 +67,6 @@ def _sanear_nombre(nombre: str) -> str:
 def _redirigir_a_url_firmada(ruta_storage: str, nombre_descarga: str | None = None) -> RedirectResponse:
     """
     Genera una URL firmada temporal para el archivo y redirige a ella.
-    Se usa en todos los endpoints de "descargar" en vez de servir el
-    archivo directamente desde el servidor.
     """
     if not ruta_storage or not supabase_storage.existe_archivo(ruta_storage):
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
@@ -124,10 +119,10 @@ def listar_rutas():
 
 
 # ============================================================
-# CARPETAS
+# CARPETAS  (todas protegidas)
 # ============================================================
 
-@router.get("/carpetas")
+@router.get("/carpetas", dependencies=[Depends(requiere_auth)])
 def listar_carpetas_endpoint(padre_id: int | None = Query(None)):
     """
     Lista las subcarpetas directas de padre_id.
@@ -136,7 +131,7 @@ def listar_carpetas_endpoint(padre_id: int | None = Query(None)):
     return database.listar_carpetas(padre_id)
 
 
-@router.get("/carpetas/arbol")
+@router.get("/carpetas/arbol", dependencies=[Depends(requiere_auth)])
 def listar_arbol_carpetas():
     """
     Devuelve todas las carpetas (planas, con su padre_id), para construir
@@ -145,7 +140,7 @@ def listar_arbol_carpetas():
     return database.listar_todas_las_carpetas()
 
 
-@router.get("/carpetas/{carpeta_id}/ruta")
+@router.get("/carpetas/{carpeta_id}/ruta", dependencies=[Depends(requiere_auth)])
 def ruta_carpeta(carpeta_id: int):
     """
     Devuelve el breadcrumb (desde la raíz) hasta la carpeta indicada.
@@ -156,11 +151,10 @@ def ruta_carpeta(carpeta_id: int):
     return database.obtener_ruta_carpeta(carpeta_id)
 
 
-@router.get("/carpetas/{carpeta_id}/contenido")
+@router.get("/carpetas/{carpeta_id}/contenido", dependencies=[Depends(requiere_auth)])
 def contenido_carpeta(carpeta_id: int):
     """
     Cuenta subcarpetas y archivos dentro de una carpeta (recursivamente).
-    Útil para confirmar antes de eliminarla.
     """
     if not database.obtener_carpeta(carpeta_id):
         raise HTTPException(status_code=404, detail="Carpeta no encontrada")
@@ -168,7 +162,7 @@ def contenido_carpeta(carpeta_id: int):
     return database.contar_contenido_carpeta(carpeta_id)
 
 
-@router.post("/carpetas")
+@router.post("/carpetas", dependencies=[Depends(requiere_auth)])
 def crear_carpeta_endpoint(datos: CarpetaCrear):
     nombre = datos.nombre.strip()
 
@@ -190,7 +184,7 @@ def crear_carpeta_endpoint(datos: CarpetaCrear):
     }
 
 
-@router.put("/carpetas/{carpeta_id}")
+@router.put("/carpetas/{carpeta_id}", dependencies=[Depends(requiere_auth)])
 def renombrar_carpeta_endpoint(carpeta_id: int, datos: CarpetaRenombrar):
     if not database.obtener_carpeta(carpeta_id):
         raise HTTPException(status_code=404, detail="Carpeta no encontrada")
@@ -205,7 +199,7 @@ def renombrar_carpeta_endpoint(carpeta_id: int, datos: CarpetaRenombrar):
     return {"ok": True, "id": carpeta_id, "nombre": nombre}
 
 
-@router.delete("/carpetas/{carpeta_id}")
+@router.delete("/carpetas/{carpeta_id}", dependencies=[Depends(requiere_auth)])
 def eliminar_carpeta_endpoint(carpeta_id: int):
     """
     Elimina una carpeta, sus subcarpetas y los archivos que contienen
@@ -233,7 +227,8 @@ def eliminar_carpeta_endpoint(carpeta_id: int):
 # ARCHIVOS SUBIDOS
 # ============================================================
 
-@router.get("/subidos")
+# PROTEGIDO: el listado lo consume SOLO la página Base de Datos.
+@router.get("/subidos", dependencies=[Depends(requiere_auth)])
 def listar_subidos(carpeta_id: int | None = Query(None)):
     """
     Lista los archivos subidos dentro de una carpeta.
@@ -249,9 +244,7 @@ async def _subir_un_archivo(
 ) -> dict:
     """
     Sube un único archivo a Supabase Storage y registra la fila en la
-    base de datos. Devuelve un dict con "ok": True/False para que el
-    endpoint de subida múltiple pueda seguir con los demás archivos
-    aunque este falle.
+    base de datos.
     """
     if not archivo.filename:
         return {
@@ -260,13 +253,8 @@ async def _subir_un_archivo(
             "error": "El archivo no tiene nombre.",
         }
 
-    # Nombre seguro para Storage (sin acentos, espacios ni símbolos raros).
-    # El nombre original se conserva tal cual en la columna
-    # `nombre_original` de la tabla `archivos_subidos`.
     nombre_limpio = _sanear_nombre(archivo.filename)
 
-    # uuid de 16 hex chars = 64 bits: prácticamente imposible que
-    # colisione incluso subiendo lotes enormes.
     nombre_guardado = f"{uuid.uuid4().hex[:16]}_{nombre_limpio}"
     ruta_storage = f"uploads/{nombre_guardado}"
 
@@ -303,12 +291,8 @@ async def _subir_un_archivo(
         }
 
     except Exception as e:
-        # Si algo falla después de subir el archivo a Storage,
-        # intentamos limpiarlo para no dejar huérfanos.
         supabase_storage.eliminar_archivo(ruta_storage)
 
-        # Incluimos el tipo de excepción para poder diagnosticar
-        # (HTTPError 413, ClientError, ValueError, etc.).
         return {
             "ok": False,
             "nombre_original": archivo.filename,
@@ -316,6 +300,7 @@ async def _subir_un_archivo(
         }
 
 
+# ABIERTO: lo usan TODOS los módulos para subir sus archivos.
 @router.post("/subidos")
 async def subir_archivos(
     archivos: list[UploadFile] = File(...),
@@ -323,14 +308,7 @@ async def subir_archivos(
     carpeta_id: str | None = Form(None),
 ):
     """
-    Sube uno o varios archivos en una sola petición (selección múltiple
-    o arrastrar-y-soltar desde el frontend). Cada archivo se procesa de
-    forma independiente: si uno falla, los demás igual se suben.
-
-    El frontend debe enviar los archivos bajo la MISMA clave "archivos"
-    repetida una vez por archivo (en JS: for (f of files) formData.
-    append("archivos", f)), en vez de la clave "archivo" que se usaba
-    para un solo archivo.
+    Sube uno o varios archivos en una sola petición.
     """
     if not archivos:
         raise HTTPException(status_code=400, detail="No se recibió ningún archivo.")
@@ -354,7 +332,8 @@ async def subir_archivos(
     }
 
 
-@router.put("/subidos/{archivo_id}/mover")
+# PROTEGIDO: mover archivos es administración de la Base de Datos.
+@router.put("/subidos/{archivo_id}/mover", dependencies=[Depends(requiere_auth)])
 def mover_archivo_endpoint(archivo_id: int, datos: ArchivoMover):
     registro = database.obtener_archivo_subido(archivo_id)
 
@@ -369,6 +348,7 @@ def mover_archivo_endpoint(archivo_id: int, datos: ArchivoMover):
     return {"ok": True, "id": archivo_id, "carpeta_id": datos.carpeta_id}
 
 
+# ABIERTO: descarga por enlace directo (<a href>).
 @router.get("/subidos/{archivo_id}/descargar")
 def descargar_subido(archivo_id: int):
     registro = database.obtener_archivo_subido(archivo_id)
@@ -385,7 +365,8 @@ def descargar_subido(archivo_id: int):
     )
 
 
-@router.delete("/subidos/{archivo_id}")
+# PROTEGIDO: borrar un archivo es administración de la Base de Datos.
+@router.delete("/subidos/{archivo_id}", dependencies=[Depends(requiere_auth)])
 def eliminar_subido(archivo_id: int):
     registro = database.obtener_archivo_subido(archivo_id)
 
@@ -416,7 +397,8 @@ def eliminar_subido(archivo_id: int):
 # ELIMINAR TODOS LOS ARCHIVOS SUBIDOS (Y CARPETAS)
 # ============================================================
 
-@router.delete("/subidos")
+# PROTEGIDO: "Eliminar todo" es la acción más destructiva.
+@router.delete("/subidos", dependencies=[Depends(requiere_auth)])
 def eliminar_todos_subidos():
     """
     Elimina todos los registros de archivos_subidos, todas las carpetas,
@@ -441,7 +423,8 @@ def eliminar_todos_subidos():
 # ARCHIVOS GENERADOS
 # ============================================================
 
-@router.get("/generados")
+# PROTEGIDO: el listado lo consume SOLO la página Base de Datos.
+@router.get("/generados", dependencies=[Depends(requiere_auth)])
 def listar_generados():
     ejecuciones = database.listar_ejecuciones(limite=200)
 
@@ -466,6 +449,7 @@ def listar_generados():
     return items
 
 
+# ABIERTO: descarga por enlace directo.
 @router.get("/generados/{ejecucion_id}/{clave}/descargar")
 def descargar_generado(ejecucion_id: int, clave: str):
     ejecucion = database.obtener_ejecucion(ejecucion_id)
@@ -482,7 +466,8 @@ def descargar_generado(ejecucion_id: int, clave: str):
     return _redirigir_a_url_firmada(ruta, nombre_descarga=os.path.basename(ruta) if ruta else None)
 
 
-@router.delete("/generados/{ejecucion_id}/{clave}")
+# PROTEGIDO: borrar es administración.
+@router.delete("/generados/{ejecucion_id}/{clave}", dependencies=[Depends(requiere_auth)])
 def eliminar_generado(ejecucion_id: int, clave: str):
     ejecucion = database.obtener_ejecucion(ejecucion_id)
 
@@ -515,7 +500,8 @@ def eliminar_generado(ejecucion_id: int, clave: str):
 # ELIMINAR TODOS LOS ARCHIVOS GENERADOS
 # ============================================================
 
-@router.delete("/generados")
+# PROTEGIDO.
+@router.delete("/generados", dependencies=[Depends(requiere_auth)])
 def eliminar_todos_generados():
     """
     Elimina todos los archivos generados físicamente (en Supabase Storage)
