@@ -1,4 +1,6 @@
 import os
+import re
+import unicodedata
 import uuid
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
@@ -32,6 +34,37 @@ def _parsear_carpeta_id(valor: str | None) -> int | None:
         raise HTTPException(status_code=404, detail="La carpeta indicada no existe.")
 
     return carpeta_id
+
+
+def _sanear_nombre(nombre: str) -> str:
+    """
+    Deja un nombre de archivo SEGURO para usar como parte de una ruta
+    dentro de Supabase Storage.
+
+    Muchos nombres que llegan desde el navegador (con acentos, espacios,
+    '#', '?', '%', paréntesis, etc.) hacen fallar silenciosamente el
+    upload a Storage. Aquí se limpian sin tocar el nombre original que
+    se guarda en la base de datos.
+    """
+    # 1) Quitar acentos y diacríticos (á -> a, ñ -> n, ü -> u, …)
+    nombre = unicodedata.normalize("NFKD", nombre)
+    nombre = "".join(c for c in nombre if not unicodedata.combining(c))
+
+    # 2) Espacios -> guion bajo
+    nombre = nombre.replace(" ", "_")
+
+    # 3) Todo lo que no sea letra, número, punto, guion o guion bajo -> "_"
+    nombre = re.sub(r"[^A-Za-z0-9._-]+", "_", nombre)
+
+    # 4) Colapsar guiones bajos repetidos y limpiar bordes
+    nombre = re.sub(r"_+", "_", nombre).strip("._")
+
+    # 5) Limitar longitud (dejando espacio para el prefijo uuid)
+    if len(nombre) > 80:
+        raiz, _, ext = nombre.rpartition(".")
+        nombre = f"{raiz[:75]}.{ext}" if ext else nombre[:80]
+
+    return nombre or "archivo"
 
 
 def _redirigir_a_url_firmada(ruta_storage: str, nombre_descarga: str | None = None) -> RedirectResponse:
@@ -221,18 +254,36 @@ async def _subir_un_archivo(
     aunque este falle.
     """
     if not archivo.filename:
-        return {"ok": False, "nombre_original": None, "error": "El archivo no tiene nombre."}
+        return {
+            "ok": False,
+            "nombre_original": None,
+            "error": "El archivo no tiene nombre.",
+        }
 
-    nombre_guardado = f"{uuid.uuid4().hex[:10]}_{archivo.filename}"
+    # Nombre seguro para Storage (sin acentos, espacios ni símbolos raros).
+    # El nombre original se conserva tal cual en la columna
+    # `nombre_original` de la tabla `archivos_subidos`.
+    nombre_limpio = _sanear_nombre(archivo.filename)
+
+    # uuid de 16 hex chars = 64 bits: prácticamente imposible que
+    # colisione incluso subiendo lotes enormes.
+    nombre_guardado = f"{uuid.uuid4().hex[:16]}_{nombre_limpio}"
     ruta_storage = f"uploads/{nombre_guardado}"
 
     try:
         contenido = await archivo.read()
 
+        if not contenido:
+            return {
+                "ok": False,
+                "nombre_original": archivo.filename,
+                "error": "El archivo llegó vacío (0 bytes).",
+            }
+
         supabase_storage.subir_bytes(
             ruta_storage,
             contenido,
-            content_type=archivo.content_type,
+            content_type=archivo.content_type or "application/octet-stream",
         )
 
         archivo_id = database.guardar_archivo_subido(
@@ -256,10 +307,12 @@ async def _subir_un_archivo(
         # intentamos limpiarlo para no dejar huérfanos.
         supabase_storage.eliminar_archivo(ruta_storage)
 
+        # Incluimos el tipo de excepción para poder diagnosticar
+        # (HTTPError 413, ClientError, ValueError, etc.).
         return {
             "ok": False,
             "nombre_original": archivo.filename,
-            "error": f"No se pudo guardar el archivo: {e}",
+            "error": f"{type(e).__name__}: {e}",
         }
 
 
