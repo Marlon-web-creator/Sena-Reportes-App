@@ -3,18 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SENA · Base de Datos</title>
+    <title>SENA · Acceso a Base de Datos</title>
     <link rel="stylesheet" href="../css/styles.css" />
   </head>
   <body>
+    <header class="topbar">
+      <a class="back-link" href="../index.html">&larr; Volver</a>
+    </header>
+
     <main class="login-page">
       <section class="login-card">
         <div class="login-brand">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <ellipse cx="12" cy="5" rx="8" ry="3" />
-            <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
-            <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+            <rect x="3" y="11" width="18" height="10" rx="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
           </svg>
           <h1>Base de Datos</h1>
         </div>
@@ -24,36 +27,86 @@
         <form id="form-login" class="login-form" autocomplete="on">
           <label class="field">
             <span>Contraseña</span>
-            <input
-              type="password"
-              id="password"
-              placeholder="••••••••"
-              autocomplete="current-password"
-              required
-              autofocus
-            />
+
+            <div class="password-wrap">
+              <input
+                type="password"
+                id="password"
+                class="password-input"
+                placeholder="••••••••"
+                autocomplete="current-password"
+                required
+                autofocus
+              />
+
+              <button
+                type="button"
+                id="toggle-password"
+                class="password-toggle"
+                aria-label="Mostrar contraseña"
+                title="Mostrar contraseña"
+              >
+                <!-- ojo abierto -->
+                <svg class="icon-eye" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="1.9"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+
+                <!-- ojo tachado -->
+                <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none"
+                     stroke="currentColor" stroke-width="1.9"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M17.94 17.94A10.9 10.9 0 0 1 12 19c-7 0-11-7-11-7a18.5 18.5 0 0 1 5.06-5.94" />
+                  <path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c7 0 11 7 11 7a18.5 18.5 0 0 1-2.16 3.19" />
+                  <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+                  <line x1="1" y1="1" x2="23" y2="23" />
+                </svg>
+              </button>
+            </div>
           </label>
 
-          <button type="submit">Entrar</button>
+          <button type="submit" class="login-submit">Entrar</button>
         </form>
 
         <p id="error" class="login-error" role="alert" aria-live="polite"></p>
-
-        <p class="login-foot">SENA · Reportes</p>
       </section>
     </main>
 
     <script>
-      // Si ya hay sesión, salta directo a base-datos.html
+      // ---------- Si ya hay sesión, saltar directo a base-datos ----------
       fetch("/api/auth/me", { credentials: "include" }).then((r) => {
         if (r.ok) location.replace("../base-datos.html");
       });
 
-      const form = document.getElementById("form-login");
-      const err  = document.getElementById("error");
-      const btn  = form.querySelector("button");
-      const input = document.getElementById("password");
+      // ---------- Elementos ----------
+      const form   = document.getElementById("form-login");
+      const err    = document.getElementById("error");
+      const btn    = form.querySelector("button.login-submit");
+      const input  = document.getElementById("password");
+      const toggle = document.getElementById("toggle-password");
 
+      // ---------- Mostrar / ocultar contraseña ----------
+      toggle.addEventListener("click", (e) => {
+        e.preventDefault();
+        const visible = input.type === "text";
+
+        input.type = visible ? "password" : "text";
+        toggle.classList.toggle("visible", !visible);
+        toggle.setAttribute(
+          "aria-label",
+          visible ? "Mostrar contraseña" : "Ocultar contraseña"
+        );
+        toggle.setAttribute(
+          "title",
+          visible ? "Mostrar contraseña" : "Ocultar contraseña"
+        );
+
+        input.focus();
+      });
+
+      // ---------- Enviar ----------
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         err.textContent = "";

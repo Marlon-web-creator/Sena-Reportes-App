@@ -820,26 +820,44 @@ const btnSalir = document.getElementById("btn-salir");
 
 if (btnSalir) {
   btnSalir.addEventListener("click", async () => {
-    const ok = await confirmar({
-      titulo: "¿Cerrar sesión?",
-      mensaje:
-        "Se cerrará tu sesión en este navegador. " +
-        "Tendrás que volver a ingresar la contraseña para entrar.",
-      textoConfirmar: "Salir",
-      peligro: true,
-    });
+    // 1) Confirmación. Intenta el modal bonito; si falla, usa el nativo.
+    let ok = false;
+
+    try {
+      if (typeof confirmar === "function") {
+        ok = await confirmar({
+          titulo: "¿Cerrar sesión?",
+          mensaje:
+            "Se cerrará tu sesión en este navegador. " +
+            "Tendrás que volver a ingresar la contraseña para entrar.",
+          textoConfirmar: "Salir",
+          peligro: true,
+        });
+      } else {
+        ok = window.confirm("¿Cerrar sesión?");
+      }
+    } catch (err) {
+      console.warn("Modal falló, usando confirm() nativo:", err);
+      ok = window.confirm("¿Cerrar sesión?");
+    }
 
     if (!ok) return;
 
+    // 2) Bloquear el botón mientras se procesa.
     btnSalir.disabled = true;
 
+    // 3) Avisar al backend que borre la cookie.
+    //    Usamos fetch directo para no depender de apiFetch.
     try {
-      await apiFetch("/api/auth/logout", { method: "POST" });
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        credentials: "include",
+      });
     } catch (err) {
       console.warn("Error cerrando sesión en el servidor:", err);
-    } finally {
-      // Pase lo que pase, salimos al login.
-      location.replace("auth/login.html");
     }
+
+    // 4) Pase lo que pase, redirigir al login.
+    location.replace("auth/login.html");
   });
 }
