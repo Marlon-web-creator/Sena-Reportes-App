@@ -146,9 +146,13 @@ document.querySelectorAll(".check-todos").forEach((chk) => {
     const selector =
       tabla === "subidos" ? ".check-fila-subido" : ".check-fila-generado";
 
+    // ✅ Capturamos el valor ANTES de iterar, porque sincronizarCheckTodos()
+    // (que se ejecuta dentro del dispatch de cada fila) puede modificar
+    // chk.checked a mitad del bucle.
+    const marcar = chk.checked;
+
     document.querySelectorAll(selector).forEach((c) => {
-      c.checked = chk.checked;
-      // Disparamos el change para que se actualicen los Sets y el contador.
+      c.checked = marcar;
       c.dispatchEvent(new Event("change"));
     });
   });
