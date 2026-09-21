@@ -811,3 +811,35 @@ async function cargarTodo() {
 renderBreadcrumb();
 cargarTodo();
 cargarGenerados();
+
+/* ============================================================
+   BOTÓN "SALIR" (logout)
+   ============================================================ */
+
+const btnSalir = document.getElementById("btn-salir");
+
+if (btnSalir) {
+  btnSalir.addEventListener("click", async () => {
+    const ok = await confirmar({
+      titulo: "¿Cerrar sesión?",
+      mensaje:
+        "Se cerrará tu sesión en este navegador. " +
+        "Tendrás que volver a ingresar la contraseña para entrar.",
+      textoConfirmar: "Salir",
+      peligro: true,
+    });
+
+    if (!ok) return;
+
+    btnSalir.disabled = true;
+
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST" });
+    } catch (err) {
+      console.warn("Error cerrando sesión en el servidor:", err);
+    } finally {
+      // Pase lo que pase, salimos al login.
+      location.replace("auth/login.html");
+    }
+  });
+}

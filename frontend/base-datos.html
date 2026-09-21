@@ -12,27 +12,34 @@
   </head>
   <body>
     <header class="topbar">
-      <div class="topbar-text">
-        <h1>
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <ellipse cx="12" cy="5" rx="8" ry="3" />
-            <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
-            <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
-          </svg>
-          Base de Datos
-        </h1>
-        <p class="subtitle">Gestión de archivos subidos y generados</p>
-      </div>
-      <a class="btn-database" href="index.html">← Volver</a>
-    </header>
+  <div class="topbar-text">
+    <h1>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <ellipse cx="12" cy="5" rx="8" ry="3" />
+        <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+        <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+      </svg>
+      Base de Datos
+    </h1>
+    <p class="subtitle">Gestión de archivos subidos y generados</p>
+  </div>
+
+  <div class="topbar-actions">
+    <a class="btn-database" href="index.html">← Volver</a>
+
+    <button id="btn-salir" class="btn-logout" type="button">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+           stroke="currentColor" stroke-width="1.9"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+        <path d="M16 17l5-5-5-5" />
+        <path d="M21 12H9" />
+      </svg>
+      Salir
+    </button>
+  </div>
+</header>
 
     <main class="db-page">
       <nav class="db-tabs">
