@@ -3,14 +3,18 @@ modules/no_programados.py
 
 Lógica de NoProgramados.py adaptada para la API web.
 
-Novedades de esta versión:
-- Logs detallados en cada fase (indexado de PDFs, mapa ficha->PDF, análisis).
-- Caché LRU acotada: evita OOM en contenedores pequeños con 600+ PDFs.
-- Precarga con callback de progreso y timeout por PDF.
-- OCR con timeout por página (pytesseract).
-- Fase de indexado separada de la fase de análisis.
+Optimizaciones aplicadas en esta versión:
+- LRU real: los Futures se liberan al mover el resultado a caché (evita OOM).
+- rapidfuzz en lugar de difflib (10-30× más rápido en fase de análisis).
+- OCR diferido: el indexado NO hace OCR salvo que se pida por env var.
+- Indexado por nombre de archivo antes que por contenido.
+- Caché en disco del texto extraído de cada PDF (gzip JSON en /tmp).
+- Caché en disco del mapa ficha->PDF (por hash del inventario).
 """
 
+import gzip
+import hashlib
+import json
 import logging
 import os
 import re
@@ -25,12 +29,12 @@ from concurrent.futures import (
     TimeoutError as FuturesTimeout,
 )
 from copy import copy
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable, Optional
 
 import fitz  # PyMuPDF
 import openpyxl
+from rapidfuzz import fuzz
 
 # ============================================================
 # LOGGING
@@ -62,7 +66,7 @@ COL_EVIDENCIA = 15
 COL_DOCUMENTO = 4
 
 IDIOMA_OCR = "spa"
-DPI_OCR = int(os.environ.get("NP_OCR_DPI") or 200)
+DPI_OCR = int(os.environ.get("NP_OCR_DPI") or 150)
 MIN_CARACTERES_TEXTO_PAGINA = 20
 
 UMBRAL_SIMILITUD_VENTANA = 0.82
@@ -89,15 +93,27 @@ ProgressCallback = Optional[Callable[[str, int, int], None]]
 # ------------------------------------------------------------
 _CPU = os.cpu_count() or 4
 
-NUM_WORKERS_PDF = int(os.environ.get("NP_WORKERS_PDF") or min(8, _CPU * 2))
+NUM_WORKERS_PDF = int(os.environ.get("NP_WORKERS_PDF") or min(6, _CPU * 2))
 NUM_WORKERS_FICHAS = int(os.environ.get("NP_WORKERS_FICHAS") or max(2, min(4, _CPU)))
-MAX_OCR_CONCURRENTES = int(os.environ.get("NP_MAX_OCR") or 2)
-PDF_CACHE_MAX_SIZE = int(os.environ.get("NP_CACHE_MAX") or 60)
+MAX_OCR_CONCURRENTES = int(os.environ.get("NP_MAX_OCR") or 1)
+PDF_CACHE_MAX_SIZE = int(os.environ.get("NP_CACHE_MAX") or 200)
 SKIP_OCR = os.environ.get("NP_SKIP_OCR", "").lower() in ("1", "true", "yes")
 
-# >>> Timeouts por PDF y por OCR (evitan cuelgues indefinidos)
-TIMEOUT_PDF_PRELOAD = float(os.environ.get("NP_TIMEOUT_PDF") or 120)
-TIMEOUT_OCR_POR_PAGINA = float(os.environ.get("NP_TIMEOUT_OCR") or 60)
+# >>> Por defecto NO se hace OCR durante el indexado.
+#     Actívalo con NP_OCR_INDEXADO=1 si tus PDFs escaneados no traen
+#     el número de ficha en el nombre del archivo.
+OCR_EN_INDEXADO = os.environ.get("NP_OCR_INDEXADO", "0").lower() in ("1", "true", "yes")
+
+TIMEOUT_PDF_PRELOAD = float(os.environ.get("NP_TIMEOUT_PDF") or 60)
+TIMEOUT_OCR_POR_PAGINA = float(os.environ.get("NP_TIMEOUT_OCR") or 20)
+
+# Carpeta para la caché en disco (sobrevive entre ejecuciones del mismo contenedor).
+CACHE_DISCO_DIR = Path(os.environ.get("NP_TEXTO_CACHE") or "/tmp/np_texto")
+try:
+    CACHE_DISCO_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    logger.exception("No se pudo crear %s; caché en disco deshabilitada", CACHE_DISCO_DIR)
+    CACHE_DISCO_DIR = None
 
 _OCR_SEMAPHORE = threading.Semaphore(MAX_OCR_CONCURRENTES)
 
@@ -114,10 +130,10 @@ except Exception as _e:
 
 logger.info(
     "Config: workers_pdf=%d workers_fichas=%d max_ocr=%d cache_max=%s "
-    "ocr=%s dpi=%d timeout_pdf=%.0fs timeout_ocr=%.0fs",
+    "ocr=%s ocr_indexado=%s dpi=%d timeout_pdf=%.0fs timeout_ocr=%.0fs disco=%s",
     NUM_WORKERS_PDF, NUM_WORKERS_FICHAS, MAX_OCR_CONCURRENTES,
-    PDF_CACHE_MAX_SIZE or "ilimitado", OCR_DISPONIBLE, DPI_OCR,
-    TIMEOUT_PDF_PRELOAD, TIMEOUT_OCR_POR_PAGINA,
+    PDF_CACHE_MAX_SIZE or "ilimitado", OCR_DISPONIBLE, OCR_EN_INDEXADO, DPI_OCR,
+    TIMEOUT_PDF_PRELOAD, TIMEOUT_OCR_POR_PAGINA, CACHE_DISCO_DIR,
 )
 
 
@@ -176,7 +192,8 @@ def palabras_importantes(texto):
 
 
 def similitud_palabra(a, b):
-    return SequenceMatcher(None, a, b).ratio()
+    # rapidfuzz devuelve 0-100 → normalizamos a 0-1.
+    return fuzz.ratio(a, b) / 100.0
 
 
 def fila_es_valida(ws, fila):
@@ -191,46 +208,97 @@ def fila_es_valida(ws, fila):
 
 
 # ============================================================
-# CACHÉ DE PDFs — LRU + progreso + timeout
+# CACHÉ EN DISCO DEL TEXTO EXTRAÍDO
+# ============================================================
+
+def _cache_file_pdf(pdf_path: Path) -> Optional[Path]:
+    if CACHE_DISCO_DIR is None:
+        return None
+    try:
+        st = pdf_path.stat()
+    except OSError:
+        return None
+    h = hashlib.md5(
+        f"{pdf_path.name}:{st.st_size}:{int(st.st_mtime)}".encode()
+    ).hexdigest()
+    return CACHE_DISCO_DIR / f"txt_{h}.json.gz"
+
+
+def _leer_cache_texto(cache_file: Path):
+    try:
+        with gzip.open(cache_file, "rt", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        logger.exception("Error leyendo cache %s", cache_file)
+        return None
+
+
+def _escribir_cache_texto(cache_file: Path, data: dict):
+    try:
+        with gzip.open(cache_file, "wt", encoding="utf-8") as fh:
+            json.dump(data, fh)
+    except Exception:
+        logger.exception("Error escribiendo cache %s", cache_file)
+
+
+# ============================================================
+# CACHÉ DE PDFs — LRU real + Futures liberados + OCR diferido
 # ============================================================
 
 class PDFCache:
     """
     Caché LRU de PDFs cargados (texto + OCR). Thread-safe.
 
-    - `get(pdf)` devuelve el resultado ya cacheado o lanza la carga.
-    - Si dos hilos piden el MISMO pdf a la vez, solo se carga una vez.
-    - `preload(pdfs)` dispara la carga en paralelo con timeout por PDF
-      y reporta progreso al callback.
+    - La caché en memoria se indexa solo por ruta. El resultado guarda
+      si se aplicó OCR.
+    - Si se pide `permitir_ocr=True` y la entrada existente NO tenía OCR,
+      se recarga (aprovechando la caché en disco si la hay).
+    - Los Futures se liberan tan pronto como el resultado se mueve a caché.
     - `max_size` acota cuántos PDFs se mantienen en RAM (LRU).
     """
 
     def __init__(self, max_workers: int = NUM_WORKERS_PDF,
                  max_size: int = PDF_CACHE_MAX_SIZE):
-        self._cache: "OrderedDict[Path, tuple[list[dict], Optional[str]]]" = OrderedDict()
-        self._futures: dict[Path, Future] = {}
+        # entry = {"paginas": [...], "error": str|None, "ocr_aplicado": bool}
+        self._cache: "OrderedDict[Path, dict]" = OrderedDict()
+        self._futures: dict[tuple, Future] = {}
         self._lock = threading.Lock()
         self._max_size = max_size if max_size and max_size > 0 else None
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="np-pdf"
         )
 
-    def get(self, pdf_path: Path) -> tuple[list[dict], Optional[str]]:
+    def get(self, pdf_path: Path, permitir_ocr: bool = True):
         with self._lock:
-            if pdf_path in self._cache:
+            entry = self._cache.get(pdf_path)
+            if entry is not None and (entry["ocr_aplicado"] or not permitir_ocr):
                 self._cache.move_to_end(pdf_path)
-                return self._cache[pdf_path]
-            fut = self._futures.get(pdf_path)
-            if fut is None:
-                fut = self._executor.submit(cargar_pdf, pdf_path)
-                self._futures[pdf_path] = fut
+                return entry["paginas"], entry["error"]
 
-        resultado = fut.result()
+            clave = (pdf_path, permitir_ocr)
+            fut = self._futures.get(clave)
+            if fut is None:
+                fut = self._executor.submit(cargar_pdf, pdf_path, permitir_ocr)
+                self._futures[clave] = fut
+
+        # Esperar fuera del lock.
+        paginas, error, ocr_aplicado = fut.result()
+
         with self._lock:
-            self._cache[pdf_path] = resultado
-            self._cache.move_to_end(pdf_path)
-            self._evictar_locked()
-        return resultado
+            if self._futures.get(clave) is fut:
+                del self._futures[clave]
+            prev = self._cache.get(pdf_path)
+            # Solo reemplazamos si no había entrada, o si la nueva trae OCR
+            # (la versión con OCR es siempre preferible a la de solo-texto).
+            if prev is None or (ocr_aplicado and not prev.get("ocr_aplicado")):
+                self._cache[pdf_path] = {
+                    "paginas": paginas,
+                    "error": error,
+                    "ocr_aplicado": ocr_aplicado,
+                }
+                self._cache.move_to_end(pdf_path)
+                self._evictar_locked()
+            return self._cache[pdf_path]["paginas"], self._cache[pdf_path]["error"]
 
     def _evictar_locked(self):
         if not self._max_size:
@@ -238,7 +306,8 @@ class PDFCache:
         while len(self._cache) > self._max_size:
             self._cache.popitem(last=False)
 
-    def preload(self, pdf_paths, progress_callback: ProgressCallback = None) -> None:
+    def preload(self, pdf_paths, progress_callback: ProgressCallback = None,
+                permitir_ocr: bool = False) -> None:
         """
         Dispara la carga de varios PDFs en paralelo y espera a que terminen.
         Con timeout por PDF: si uno se atasca, se marca como error y se sigue.
@@ -247,48 +316,60 @@ class PDFCache:
         pendientes = []
         with self._lock:
             for p in pdf_paths:
-                if p in self._cache:
+                entry = self._cache.get(p)
+                if entry is not None and (entry["ocr_aplicado"] or not permitir_ocr):
                     continue
-                fut = self._futures.get(p)
+                clave = (p, permitir_ocr)
+                fut = self._futures.get(clave)
                 if fut is None:
-                    fut = self._executor.submit(cargar_pdf, p)
-                    self._futures[p] = fut
-                pendientes.append((p, fut))
+                    fut = self._executor.submit(cargar_pdf, p, permitir_ocr)
+                    self._futures[clave] = fut
+                pendientes.append((p, clave, fut))
 
         total = len(pendientes)
         if total == 0:
             logger.info("Preload: todo ya estaba en caché (%d PDFs)", len(pdf_paths))
             return
 
-        logger.info("Preload: %d PDFs pendientes de cargar", total)
-        fut_a_path = {fut: p for p, fut in pendientes}
+        logger.info("Preload: %d PDFs pendientes de cargar (ocr=%s)", total, permitir_ocr)
+        fut_a_info = {fut: (p, clave) for p, clave, fut in pendientes}
         completadas = 0
         errores = 0
         inicio = time.time()
 
-        for fut in as_completed(fut_a_path.keys()):
-            p = fut_a_path[fut]
+        for fut in as_completed(fut_a_info.keys()):
+            p, clave = fut_a_info[fut]
             try:
                 resultado = fut.result(timeout=TIMEOUT_PDF_PRELOAD)
-                if not resultado[0]:
+                paginas, error, ocr_aplicado = resultado
+                if not paginas:
                     errores += 1
-                    logger.warning("PDF sin contenido: %s (%s)", p.name, resultado[1])
+                    logger.warning("PDF sin contenido: %s (%s)", p.name, error)
             except FuturesTimeout:
                 logger.error(
                     "TIMEOUT: PDF %s excedió %.0fs — se omite",
                     p.name, TIMEOUT_PDF_PRELOAD,
                 )
-                resultado = ([], f"Timeout de {TIMEOUT_PDF_PRELOAD:.0f}s")
+                resultado = ([], f"Timeout de {TIMEOUT_PDF_PRELOAD:.0f}s", False)
                 errores += 1
             except Exception as e:
-                resultado = ([], f"Error cargando PDF: {e}")
+                resultado = ([], f"Error cargando PDF: {e}", False)
                 errores += 1
                 logger.exception("Error cargando %s", p)
 
+            paginas, error, ocr_aplicado = resultado
             with self._lock:
-                self._cache[p] = resultado
-                self._cache.move_to_end(p)
-                self._evictar_locked()
+                if self._futures.get(clave) is fut:
+                    del self._futures[clave]
+                prev = self._cache.get(p)
+                if prev is None or (ocr_aplicado and not prev.get("ocr_aplicado")):
+                    self._cache[p] = {
+                        "paginas": paginas,
+                        "error": error,
+                        "ocr_aplicado": ocr_aplicado,
+                    }
+                    self._cache.move_to_end(p)
+                    self._evictar_locked()
 
             completadas += 1
             if completadas % 10 == 0 or completadas == total:
@@ -311,68 +392,6 @@ class PDFCache:
 
 
 # ============================================================
-# INVENTARIO Y RELACIÓN FICHA -> PDF (POR CONTENIDO)
-# ============================================================
-
-def obtener_todos_los_pdfs(carpeta_bd: Path) -> list[Path]:
-    if not carpeta_bd.exists():
-        raise FileNotFoundError(f"No existe la carpeta con PDFs: {carpeta_bd}")
-    pdfs = [a for a in carpeta_bd.rglob("*") if a.is_file() and a.suffix.lower() == ".pdf"]
-    return sorted(set(pdfs), key=lambda p: str(p).lower())
-
-
-def construir_mapa_ficha_pdf(
-    fichas,
-    todos_los_pdfs,
-    cache: PDFCache,
-    progress_callback: ProgressCallback = None,
-):
-    """
-    Asocia cada PDF a TODAS las fichas cuyo número aparezca DENTRO del
-    contenido del PDF (independiente del nombre del archivo).
-    """
-    fichas_digitos: dict[str, str] = {}
-    for f in fichas:
-        digitos = re.sub(r"\D", "", str(f))
-        if digitos:
-            fichas_digitos[digitos] = f
-
-    patron_numero = re.compile(rf"(?<!\d)(\d{{{MIN_DIGITOS_FICHA},}})(?!\d)")
-
-    cache.preload(todos_los_pdfs, progress_callback=progress_callback)
-
-    mapa = {f: [] for f in fichas}
-    pdfs_omitidos: list[Path] = []
-
-    inicio = time.time()
-    for pdf in todos_los_pdfs:
-        paginas, _ = cache.get(pdf)
-        if not paginas:
-            pdfs_omitidos.append(pdf)
-            continue
-
-        texto_total = " ".join(p["normalizado"] for p in paginas)
-        numeros_encontrados = set(patron_numero.findall(texto_total))
-        fichas_encontradas = [
-            fichas_digitos[d] for d in numeros_encontrados if d in fichas_digitos
-        ]
-
-        if not fichas_encontradas:
-            pdfs_omitidos.append(pdf)
-            continue
-
-        for ficha in fichas_encontradas:
-            mapa[ficha].append(pdf)
-
-    logger.info(
-        "Mapa ficha->PDF: %d fichas con PDFs, %d PDFs indexados, %d omitidos (%.1fs)",
-        sum(1 for v in mapa.values() if v), len(todos_los_pdfs),
-        len(pdfs_omitidos), time.time() - inicio,
-    )
-    return mapa, pdfs_omitidos
-
-
-# ============================================================
 # LECTURA DE PDF — texto y OCR, decidido POR PÁGINA
 # ============================================================
 
@@ -392,50 +411,50 @@ def _ocr_pagina(pagina) -> str:
             return ""
 
 
-def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
+def _extraer_pdf(pdf_path: Path, permitir_ocr: bool):
     """
-    Devuelve la lista de páginas del PDF, decidiendo página por página si
-    hace falta OCR. Cada hilo abre SU PROPIO documento.
+    Extrae texto (y OCR si procede) del PDF.
+    Devuelve (paginas, error, ocr_aplicado).
     """
     t0 = time.time()
     paginas = []
     paginas_con_ocr = 0
-    logger.info("Abriendo PDF: %s", pdf_path.name)
     try:
         documento = fitz.open(str(pdf_path))
-        logger.info("PDF abierto: %s (%d páginas)", pdf_path.name, documento.page_count)
-        try:
-            for numero, pagina in enumerate(documento, start=1):
-                t_pag = time.time()
-                texto_original = pagina.get_text("text") or ""
-                texto_normalizado = normalizar_texto(texto_original)
-                metodo = "TEXTO"
-
-                if len(texto_normalizado) < MIN_CARACTERES_TEXTO_PAGINA and OCR_DISPONIBLE:
-                    texto_ocr = _ocr_pagina(pagina)
-                    texto_ocr_normalizado = normalizar_texto(texto_ocr)
-                    if len(texto_ocr_normalizado) > len(texto_normalizado):
-                        texto_original = texto_ocr
-                        texto_normalizado = texto_ocr_normalizado
-                        metodo = "OCR"
-                        paginas_con_ocr += 1
-
-                paginas.append({
-                    "pagina": numero,
-                    "original": texto_original,
-                    "normalizado": texto_normalizado,
-                    "metodo": metodo,
-                })
-                if time.time() - t_pag > 5:
-                    logger.warning(
-                        "  Página %d de %s tardó %.1fs",
-                        numero, pdf_path.name, time.time() - t_pag,
-                    )
-        finally:
-            documento.close()
     except Exception as e:
         logger.exception("Error abriendo %s", pdf_path.name)
-        return [], f"Error abriendo PDF: {e}"
+        return [], f"Error abriendo PDF: {e}", False
+
+    try:
+        for numero, pagina in enumerate(documento, start=1):
+            t_pag = time.time()
+            texto_original = pagina.get_text("text") or ""
+            texto_normalizado = normalizar_texto(texto_original)
+            metodo = "TEXTO"
+
+            if (permitir_ocr and OCR_DISPONIBLE
+                    and len(texto_normalizado) < MIN_CARACTERES_TEXTO_PAGINA):
+                texto_ocr = _ocr_pagina(pagina)
+                texto_ocr_normalizado = normalizar_texto(texto_ocr)
+                if len(texto_ocr_normalizado) > len(texto_normalizado):
+                    texto_original = texto_ocr
+                    texto_normalizado = texto_ocr_normalizado
+                    metodo = "OCR"
+                    paginas_con_ocr += 1
+
+            paginas.append({
+                "pagina": numero,
+                "original": texto_original,
+                "normalizado": texto_normalizado,
+                "metodo": metodo,
+            })
+            if time.time() - t_pag > 5:
+                logger.warning(
+                    "  Página %d de %s tardó %.1fs",
+                    numero, pdf_path.name, time.time() - t_pag,
+                )
+    finally:
+        documento.close()
 
     caracteres = sum(len(p["normalizado"]) for p in paginas)
     dur = time.time() - t0
@@ -444,12 +463,167 @@ def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
         pdf_path.name, len(paginas), caracteres, paginas_con_ocr, dur,
     )
     if caracteres == 0:
-        return [], "Sin texto reconocible (ni digital ni OCR)."
-    return paginas, None
+        return [], "Sin texto reconocible (ni digital ni OCR).", False
+    return paginas, None, (paginas_con_ocr > 0)
+
+
+def cargar_pdf(pdf_path: Path, permitir_ocr: bool = True):
+    """
+    Punto de entrada con caché en disco.
+    Devuelve (paginas, error, ocr_aplicado).
+    """
+    cache_file = _cache_file_pdf(pdf_path)
+    if cache_file is not None and cache_file.exists():
+        data = _leer_cache_texto(cache_file)
+        if data is not None:
+            cached_ocr = bool(data.get("ocr_aplicado", True))
+            # Reutilizamos si la caché trae OCR o si el caller no pide OCR.
+            if cached_ocr or not permitir_ocr:
+                logger.info("PDF %s: desde caché en disco (ocr=%s)",
+                            pdf_path.name, cached_ocr)
+                return data["paginas"], data.get("error"), cached_ocr
+
+    paginas, error, ocr_aplicado = _extraer_pdf(pdf_path, permitir_ocr)
+
+    if cache_file is not None and error is None:
+        _escribir_cache_texto(cache_file, {
+            "paginas": paginas,
+            "error": error,
+            "ocr_aplicado": ocr_aplicado,
+        })
+    return paginas, error, ocr_aplicado
 
 
 # ============================================================
-# CTRL+F + SIMILITUD CONSERVADORA
+# INVENTARIO Y RELACIÓN FICHA -> PDF
+# ============================================================
+
+def obtener_todos_los_pdfs(carpeta_bd: Path) -> list[Path]:
+    if not carpeta_bd.exists():
+        raise FileNotFoundError(f"No existe la carpeta con PDFs: {carpeta_bd}")
+    pdfs = [a for a in carpeta_bd.rglob("*") if a.is_file() and a.suffix.lower() == ".pdf"]
+    return sorted(set(pdfs), key=lambda p: str(p).lower())
+
+
+def _hash_inventario(pdfs: list[Path]) -> str:
+    h = hashlib.md5()
+    for p in sorted(pdfs, key=lambda x: x.name.lower()):
+        try:
+            st = p.stat()
+            h.update(f"{p.name}:{st.st_size}".encode())
+        except OSError:
+            h.update(f"{p.name}:?".encode())
+    return h.hexdigest()
+
+
+def _ruta_cache_mapa(pdfs: list[Path]) -> Optional[Path]:
+    if CACHE_DISCO_DIR is None:
+        return None
+    return CACHE_DISCO_DIR / f"mapa_{_hash_inventario(pdfs)}.json"
+
+
+def construir_mapa_ficha_pdf(
+    fichas,
+    todos_los_pdfs: list[Path],
+    cache: PDFCache,
+    progress_callback: ProgressCallback = None,
+    usar_cache_disco: bool = True,
+):
+    """
+    Asocia cada PDF a TODAS las fichas cuyo número aparezca:
+      1) En el NOMBRE del archivo (barato, sin abrir el PDF).
+      2) En el CONTENIDO digital del PDF (sin OCR por defecto).
+    """
+    # -------------------- Caché del mapa en disco --------------------
+    cache_mapa = _ruta_cache_mapa(todos_los_pdfs) if usar_cache_disco else None
+    if cache_mapa is not None and cache_mapa.exists():
+        try:
+            with open(cache_mapa, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            por_nombre = {p.name: p for p in todos_los_pdfs}
+            mapa = {}
+            for ficha in fichas:
+                mapa[ficha] = [
+                    por_nombre[n] for n in data.get(ficha, []) if n in por_nombre
+                ]
+            logger.info("Mapa ficha->PDF cargado desde caché en disco (%s)", cache_mapa.name)
+            return mapa, []
+        except Exception:
+            logger.exception("Caché de mapa corrupta, se reconstruye: %s", cache_mapa)
+
+    # -------------------- Preparar dígitos de cada ficha --------------------
+    fichas_digitos: dict[str, str] = {}
+    for f in fichas:
+        digitos = re.sub(r"\D", "", str(f))
+        if digitos:
+            fichas_digitos[digitos] = f
+
+    patron_numero = re.compile(rf"(?<!\d)(\d{{{MIN_DIGITOS_FICHA},}})(?!\d)")
+    mapa: dict[str, list[Path]] = {f: [] for f in fichas}
+
+    # -------------------- Fase 1: indexar por nombre de archivo --------------------
+    t = time.time()
+    pdfs_pendientes: list[Path] = []
+    for pdf in todos_los_pdfs:
+        digitos_nombre = set(patron_numero.findall(pdf.stem))
+        hits = [fichas_digitos[d] for d in digitos_nombre if d in fichas_digitos]
+        if hits:
+            for ficha in hits:
+                mapa[ficha].append(pdf)
+        else:
+            pdfs_pendientes.append(pdf)
+    logger.info(
+        "Indexado por nombre: %d PDFs resueltos, %d pendientes (%.1fs)",
+        len(todos_los_pdfs) - len(pdfs_pendientes), len(pdfs_pendientes),
+        time.time() - t,
+    )
+
+    # -------------------- Fase 2: indexar por contenido (sin OCR) --------------------
+    pdfs_omitidos: list[Path] = []
+    if pdfs_pendientes:
+        cache.preload(
+            pdfs_pendientes,
+            progress_callback=progress_callback,
+            permitir_ocr=OCR_EN_INDEXADO,
+        )
+        t = time.time()
+        for pdf in pdfs_pendientes:
+            paginas, _ = cache.get(pdf, permitir_ocr=OCR_EN_INDEXADO)
+            if not paginas:
+                pdfs_omitidos.append(pdf)
+                continue
+            texto_total = " ".join(p["normalizado"] for p in paginas)
+            numeros_encontrados = set(patron_numero.findall(texto_total))
+            hits = [fichas_digitos[d] for d in numeros_encontrados if d in fichas_digitos]
+            if not hits:
+                pdfs_omitidos.append(pdf)
+                continue
+            for ficha in hits:
+                mapa[ficha].append(pdf)
+        logger.info("Indexado por contenido: %.1fs", time.time() - t)
+
+    logger.info(
+        "Mapa ficha->PDF: %d fichas con PDFs, %d PDFs indexados, %d omitidos",
+        sum(1 for v in mapa.values() if v),
+        len(todos_los_pdfs), len(pdfs_omitidos),
+    )
+
+    # -------------------- Guardar en caché de disco --------------------
+    if cache_mapa is not None:
+        try:
+            with open(cache_mapa, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {f: [p.name for p in pdfs] for f, pdfs in mapa.items()},
+                    fh,
+                )
+        except Exception:
+            logger.exception("No se pudo guardar la caché de mapa")
+
+    return mapa, pdfs_omitidos
+
+
+# ============================================================
+# CTRL+F + SIMILITUD CONSERVADORA (rapidfuzz)
 # ============================================================
 
 def buscar_exactamente_en_pagina(texto_pagina, frase):
@@ -494,14 +668,15 @@ def calcular_similitud_conservadora(texto_pagina, frase):
     mejor_cobertura = 0.0
 
     for ventana in construir_ventanas(texto_pagina, TAMANO_VENTANA_PALABRAS):
-        similitud = SequenceMatcher(None, frase, ventana).ratio()
+        # rapidfuzz: ratio devuelve 0-100
+        similitud = fuzz.ratio(frase, ventana) / 100.0
         palabras_ventana = ventana.split()
         longitud_frase = max(3, len(frase.split()))
 
         mejor_local = similitud
         for i in range(max(1, len(palabras_ventana) - longitud_frase + 1)):
             fragmento = " ".join(palabras_ventana[i:i + longitud_frase])
-            score = SequenceMatcher(None, frase, fragmento).ratio()
+            score = fuzz.ratio(frase, fragmento) / 100.0
             if score > mejor_local:
                 mejor_local = score
 
@@ -513,7 +688,7 @@ def calcular_similitud_conservadora(texto_pagina, frase):
                     mejor_palabra = 1.0
                     break
                 if len(palabra) >= 5 and len(palabra_doc) >= 5:
-                    score = similitud_palabra(palabra, palabra_doc)
+                    score = fuzz.ratio(palabra, palabra_doc) / 100.0
                     if score > mejor_palabra:
                         mejor_palabra = score
             if mejor_palabra >= UMBRAL_PALABRA:
@@ -543,7 +718,8 @@ def ruta_trazabilidad(pdf_path: Path, carpeta_bd: Path):
 
 def analizar_pdf(pdf_path: Path, frase: str, cache: PDFCache, carpeta_bd: Path):
     ruta = ruta_trazabilidad(pdf_path, carpeta_bd)
-    paginas, obs = cache.get(pdf_path)
+    # >>> En la fase de análisis SÍ permitimos OCR
+    paginas, obs = cache.get(pdf_path, permitir_ocr=True)
 
     if not paginas:
         return [], obs

@@ -13,3 +13,4 @@ psycopg2-binary
 supabase
 itsdangerous
 bcrypt
+rapidfuzz>=3.9.0
