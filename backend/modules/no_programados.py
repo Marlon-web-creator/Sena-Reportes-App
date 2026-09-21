@@ -1,23 +1,23 @@
 """
 modules/no_programados.py
 
-Lógica de NoProgramados.py adaptada para la API web:
+Lógica de NoProgramados.py adaptada para la API web.
 
-- Ya no depende de carpetas fijas (BASE_DIR/BD, BASE_DIR/Consolidado_General.xlsx);
-  recibe la ruta del Excel y la carpeta con los PDFs como parámetros.
-- Mejora de precisión: la detección de texto vs. OCR ahora se hace PÁGINA POR
-  PÁGINA en vez de por PDF completo.
-- El emparejamiento PDF -> ficha se hace AHORA por CONTENIDO:
-    * Se ignora el nombre del archivo y las carpetas.
-    * Se abre cada PDF y se busca dentro el número de cada ficha del Excel.
-    * Un PDF se asigna a TODAS las fichas cuyo número aparezca dentro.
-    * Si dentro del PDF no aparece ningún número de ficha del Excel, el
-      PDF se omite (no contamina ninguna ficha).
-- Acepta un `progress_callback(mensaje, actual, total)` opcional.
+Novedades de esta versión:
+- Carga de PDFs en PARALELO mediante un pool de hilos (PDFCache).
+- Análisis de FICHAS en PARALELO (ThreadPoolExecutor).
+- OCR concurrente limitado por semáforo (Tesseract ya es multi-core).
+- Caché compartida y thread-safe: cada PDF se lee UNA sola vez, aunque
+  lo usen varias fichas.
+- Igual que antes: detección texto vs. OCR página por página, y
+  emparejamiento PDF -> ficha por CONTENIDO (no por nombre de archivo).
 """
 
+import os
 import re
+import threading
 import unicodedata
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from copy import copy
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -39,7 +39,7 @@ COL_OBSERVACION = 12
 COL_ARCHIVOS = 13
 COL_DETALLE = 14
 COL_EVIDENCIA = 15
-COL_DOCUMENTO = 4  # "Número de Documento"
+COL_DOCUMENTO = 4
 
 IDIOMA_OCR = "spa"
 DPI_OCR = 200
@@ -50,9 +50,6 @@ UMBRAL_COBERTURA = 0.80
 UMBRAL_PALABRA = 0.88
 TAMANO_VENTANA_PALABRAS = 80
 
-# Mínimo de dígitos para que un número suelto en un PDF se considere
-# candidato a "número de ficha". Las fichas del SENA son de 7 dígitos;
-# 5 da margen y evita ruido de números cortos.
 MIN_DIGITOS_FICHA = 5
 
 COMPETENCIAS_FORZADAS_PROGRAMADO = {
@@ -67,6 +64,20 @@ PALABRAS_VACIAS = {
 
 ProgressCallback = Optional[Callable[[str, int, int], None]]
 
+# ------------------------------------------------------------
+# PARALELISMO (ajustable por variables de entorno)
+# ------------------------------------------------------------
+_CPU = os.cpu_count() or 4
+
+# Hilos para cargar PDFs (I/O + OCR). Más hilos que cores porque hay I/O.
+NUM_WORKERS_PDF = int(os.environ.get("NP_WORKERS_PDF") or min(8, _CPU * 2))
+# Hilos para analizar fichas en paralelo (una ficha por hilo).
+NUM_WORKERS_FICHAS = int(os.environ.get("NP_WORKERS_FICHAS") or max(2, min(4, _CPU)))
+# Límite de OCR simultáneo: Tesseract ya usa varios cores por invocación.
+MAX_OCR_CONCURRENTES = int(os.environ.get("NP_MAX_OCR") or 2)
+
+_OCR_SEMAPHORE = threading.Semaphore(MAX_OCR_CONCURRENTES)
+
 try:
     import pytesseract
     from PIL import Image
@@ -78,7 +89,11 @@ except Exception:
 
 def _notificar(callback: ProgressCallback, mensaje: str, actual: int = 0, total: int = 0):
     if callback:
-        callback(mensaje, actual, total)
+        try:
+            callback(mensaje, actual, total)
+        except Exception:
+            # Un callback roto no debe tumbar el proceso.
+            pass
 
 
 # ============================================================
@@ -142,6 +157,67 @@ def fila_es_valida(ws, fila):
 
 
 # ============================================================
+# CACHÉ DE PDFs — thread-safe y con carga paralela
+# ============================================================
+
+class PDFCache:
+    """
+    Caché de PDFs cargados (texto + OCR), seguro para usar desde varios hilos.
+
+    - `get(pdf)` devuelve el resultado ya cacheado o lanza la carga.
+    - Si dos hilos piden el MISMO pdf a la vez, solo se carga una vez:
+      el segundo hilo espera al Future del primero.
+    - `preload(pdfs)` dispara la carga de N PDFs en paralelo y espera.
+    """
+
+    def __init__(self, max_workers: int = NUM_WORKERS_PDF):
+        self._cache: dict[Path, tuple[list[dict], Optional[str]]] = {}
+        self._futures: dict[Path, Future] = {}
+        self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="np-pdf"
+        )
+
+    def get(self, pdf_path: Path) -> tuple[list[dict], Optional[str]]:
+        with self._lock:
+            if pdf_path in self._cache:
+                return self._cache[pdf_path]
+            fut = self._futures.get(pdf_path)
+            if fut is None:
+                fut = self._executor.submit(cargar_pdf, pdf_path)
+                self._futures[pdf_path] = fut
+
+        resultado = fut.result()
+        with self._lock:
+            self._cache[pdf_path] = resultado
+        return resultado
+
+    def preload(self, pdf_paths) -> None:
+        """Dispara la carga de varios PDFs en paralelo y espera a que terminen."""
+        pendientes = []
+        with self._lock:
+            for p in pdf_paths:
+                if p in self._cache:
+                    continue
+                fut = self._futures.get(p)
+                if fut is None:
+                    fut = self._executor.submit(cargar_pdf, p)
+                    self._futures[p] = fut
+                pendientes.append((p, fut))
+
+        for p, fut in pendientes:
+            try:
+                resultado = fut.result()
+            except Exception as e:
+                resultado = ([], f"Error cargando PDF: {e}")
+            with self._lock:
+                self._cache[p] = resultado
+
+    def shutdown(self):
+        self._executor.shutdown(wait=False, cancel_futures=False)
+
+
+# ============================================================
 # INVENTARIO Y RELACIÓN FICHA -> PDF (POR CONTENIDO)
 # ============================================================
 
@@ -155,58 +231,37 @@ def obtener_todos_los_pdfs(carpeta_bd: Path) -> list[Path]:
 def construir_mapa_ficha_pdf(
     fichas,
     todos_los_pdfs,
-    cache_pdfs: dict | None = None,
+    cache: PDFCache,
 ):
     """
     Asocia cada PDF a TODAS las fichas cuyo número aparezca DENTRO del
-    contenido del PDF.
+    contenido del PDF (independiente del nombre del archivo y carpetas).
 
-    Reglas:
-      - Se IGNORAN el nombre del archivo y las carpetas.
-      - Se abre cada PDF (usando el caché compartido) y se busca, sobre
-        todo el texto normalizado (mayúsculas, sin tildes, sin puntuación),
-        cada número de ficha del Excel con límites de dígitos para evitar
-        que "2904878" matchee dentro de "29048789" o "12904878".
-      - Un mismo PDF puede quedar asignado a VARIAS fichas si dentro
-        aparecen varios números de ficha (por ejemplo, un consolidado).
-      - Si dentro del PDF no aparece ningún número de ficha del Excel,
-        se añade a `pdfs_omitidos` y NUNCA se usa para buscar
-        competencias (no contamina ninguna ficha).
-
-    Devuelve (mapa, pdfs_omitidos).
+    Los PDFs se precargan en paralelo; luego la búsqueda del número de
+    ficha es O(números encontrados) por PDF.
     """
-    if cache_pdfs is None:
-        cache_pdfs = {}
-
-    # Mapa "solo dígitos" -> nombre original de la ficha en el Excel.
-    # Sirve incluso si la ficha viene como "Ficha 2904878" o "F-2904878".
     fichas_digitos: dict[str, str] = {}
     for f in fichas:
         digitos = re.sub(r"\D", "", str(f))
         if digitos:
             fichas_digitos[digitos] = f
 
-    # Regex para extraer números candidatos del texto de cada PDF.
     patron_numero = re.compile(rf"(?<!\d)(\d{{{MIN_DIGITOS_FICHA},}})(?!\d)")
+
+    # Precarga paralela: al terminar esta línea todos los PDFs están
+    # leídos y cacheados (o marcados con error).
+    cache.preload(todos_los_pdfs)
 
     mapa = {f: [] for f in fichas}
     pdfs_omitidos: list[Path] = []
 
     for pdf in todos_los_pdfs:
-        if pdf not in cache_pdfs:
-            cache_pdfs[pdf] = cargar_pdf(pdf)
-        paginas, _ = cache_pdfs[pdf]
-
+        paginas, _ = cache.get(pdf)
         if not paginas:
             pdfs_omitidos.append(pdf)
             continue
 
-        # Todo el texto del PDF, ya normalizado, en una sola cadena.
         texto_total = " ".join(p["normalizado"] for p in paginas)
-
-        # Sacar una sola vez todos los números ≥ MIN_DIGITOS_FICHA y ver
-        # cuáles coinciden con alguna ficha. Es O(números en el PDF), no
-        # O(fichas × PDFs).
         numeros_encontrados = set(patron_numero.findall(texto_total))
         fichas_encontradas = [
             fichas_digitos[d] for d in numeros_encontrados if d in fichas_digitos
@@ -229,38 +284,46 @@ def construir_mapa_ficha_pdf(
 def _ocr_pagina(pagina) -> str:
     if not OCR_DISPONIBLE:
         return ""
-    matriz = fitz.Matrix(DPI_OCR / 72, DPI_OCR / 72)
-    pix = pagina.get_pixmap(matrix=matriz, alpha=False)
-    imagen = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    return pytesseract.image_to_string(imagen, lang=IDIOMA_OCR) or ""
+    # Tesseract ya usa varios hilos internos: limitamos cuántas
+    # invocaciones simultáneas hacemos para no saturar la CPU.
+    with _OCR_SEMAPHORE:
+        matriz = fitz.Matrix(DPI_OCR / 72, DPI_OCR / 72)
+        pix = pagina.get_pixmap(matrix=matriz, alpha=False)
+        imagen = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        return pytesseract.image_to_string(imagen, lang=IDIOMA_OCR) or ""
 
 
 def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
     """
     Devuelve la lista de páginas del PDF, decidiendo página por página si
-    hace falta OCR.
+    hace falta OCR. Cada hilo abre SU PROPIO documento (PyMuPDF no permite
+    compartir Document entre hilos, pero sí abrir documentos distintos).
     """
     paginas = []
     try:
         documento = fitz.open(str(pdf_path))
-        for numero, pagina in enumerate(documento, start=1):
-            texto_original = pagina.get_text("text") or ""
-            texto_normalizado = normalizar_texto(texto_original)
-            metodo = "TEXTO"
+        try:
+            for numero, pagina in enumerate(documento, start=1):
+                texto_original = pagina.get_text("text") or ""
+                texto_normalizado = normalizar_texto(texto_original)
+                metodo = "TEXTO"
 
-            if len(texto_normalizado) < MIN_CARACTERES_TEXTO_PAGINA and OCR_DISPONIBLE:
-                texto_ocr = _ocr_pagina(pagina)
-                texto_ocr_normalizado = normalizar_texto(texto_ocr)
-                if len(texto_ocr_normalizado) > len(texto_normalizado):
-                    texto_original, texto_normalizado, metodo = texto_ocr, texto_ocr_normalizado, "OCR"
+                if len(texto_normalizado) < MIN_CARACTERES_TEXTO_PAGINA and OCR_DISPONIBLE:
+                    texto_ocr = _ocr_pagina(pagina)
+                    texto_ocr_normalizado = normalizar_texto(texto_ocr)
+                    if len(texto_ocr_normalizado) > len(texto_normalizado):
+                        texto_original = texto_ocr
+                        texto_normalizado = texto_ocr_normalizado
+                        metodo = "OCR"
 
-            paginas.append({
-                "pagina": numero,
-                "original": texto_original,
-                "normalizado": texto_normalizado,
-                "metodo": metodo,
-            })
-        documento.close()
+                paginas.append({
+                    "pagina": numero,
+                    "original": texto_original,
+                    "normalizado": texto_normalizado,
+                    "metodo": metodo,
+                })
+        finally:
+            documento.close()
     except Exception as e:
         return [], f"Error abriendo PDF: {e}"
 
@@ -351,7 +414,8 @@ def calcular_similitud_conservadora(texto_pagina, frase):
     if not coincide:
         return False, max(mejor_global, mejor_cobertura), ""
 
-    tipo = "SIMILITUD ALTA" if mejor_global >= UMBRAL_SIMILITUD_VENTANA else "COBERTURA ALTA DE PALABRAS"
+    tipo = ("SIMILITUD ALTA" if mejor_global >= UMBRAL_SIMILITUD_VENTANA
+            else "COBERTURA ALTA DE PALABRAS")
     return True, max(mejor_global, mejor_cobertura), tipo
 
 
@@ -362,12 +426,9 @@ def ruta_trazabilidad(pdf_path: Path, carpeta_bd: Path):
         return str(pdf_path)
 
 
-def analizar_pdf(pdf_path: Path, frase: str, cache_pdfs: dict, carpeta_bd: Path):
+def analizar_pdf(pdf_path: Path, frase: str, cache: PDFCache, carpeta_bd: Path):
     ruta = ruta_trazabilidad(pdf_path, carpeta_bd)
-
-    if pdf_path not in cache_pdfs:
-        cache_pdfs[pdf_path] = cargar_pdf(pdf_path)
-    paginas, obs = cache_pdfs[pdf_path]
+    paginas, obs = cache.get(pdf_path)
 
     if not paginas:
         return [], obs
@@ -377,7 +438,8 @@ def analizar_pdf(pdf_path: Path, frase: str, cache_pdfs: dict, carpeta_bd: Path)
         if buscar_exactamente_en_pagina(pagina["normalizado"], frase):
             coincidencias.append({
                 "archivo": pdf_path.name, "ruta": ruta, "pagina": pagina["pagina"],
-                "metodo_lectura": pagina["metodo"], "tipo": "EXACTA (CTRL+F)", "puntuacion": 1.0,
+                "metodo_lectura": pagina["metodo"], "tipo": "EXACTA (CTRL+F)",
+                "puntuacion": 1.0,
                 "evidencia": obtener_fragmento(pagina["original"], frase),
             })
 
@@ -385,11 +447,14 @@ def analizar_pdf(pdf_path: Path, frase: str, cache_pdfs: dict, carpeta_bd: Path)
         return coincidencias, None
 
     for pagina in paginas:
-        coincide, puntuacion, tipo = calcular_similitud_conservadora(pagina["normalizado"], frase)
+        coincide, puntuacion, tipo = calcular_similitud_conservadora(
+            pagina["normalizado"], frase
+        )
         if coincide:
             coincidencias.append({
                 "archivo": pdf_path.name, "ruta": ruta, "pagina": pagina["pagina"],
-                "metodo_lectura": pagina["metodo"], "tipo": tipo, "puntuacion": puntuacion,
+                "metodo_lectura": pagina["metodo"], "tipo": tipo,
+                "puntuacion": puntuacion,
                 "evidencia": pagina["normalizado"][:700],
             })
 
@@ -400,7 +465,7 @@ def analizar_pdf(pdf_path: Path, frase: str, cache_pdfs: dict, carpeta_bd: Path)
 # PROCESAR UNA FICHA
 # ============================================================
 
-def analizar_ficha(ficha, filas_validas, pdfs_de_la_ficha, cache_pdfs, carpeta_bd):
+def analizar_ficha(ficha, filas_validas, pdfs_de_la_ficha, cache: PDFCache, carpeta_bd):
     resultados, observaciones, archivos, detalles, evidencias = {}, {}, {}, {}, {}
 
     for fila, codigo, frase, valor_original in filas_validas:
@@ -418,21 +483,29 @@ def analizar_ficha(ficha, filas_validas, pdfs_de_la_ficha, cache_pdfs, carpeta_b
 
         encontrados = []
         for pdf in pdfs_de_la_ficha:
-            coincidencias, obs = analizar_pdf(pdf, frase, cache_pdfs, carpeta_bd)
+            coincidencias, obs = analizar_pdf(pdf, frase, cache, carpeta_bd)
             encontrados.extend(coincidencias)
 
         resultados[fila] = bool(encontrados)
 
         if encontrados:
-            archivos[fila] = [f"{c['ruta']} | Página {c['pagina']} ({c['metodo_lectura']})" for c in encontrados]
+            archivos[fila] = [
+                f"{c['ruta']} | Página {c['pagina']} ({c['metodo_lectura']})"
+                for c in encontrados
+            ]
             detalles[fila] = [f"{c['puntuacion']:.0%} | {c['tipo']}" for c in encontrados]
             evidencias[fila] = [c["evidencia"] for c in encontrados if c.get("evidencia")]
-            observaciones[fila] = f"Encontrada en {encontrados[0]['ruta']} ({encontrados[0]['tipo']})."
+            observaciones[fila] = (
+                f"Encontrada en {encontrados[0]['ruta']} ({encontrados[0]['tipo']})."
+            )
         else:
             rutas_revisadas = [ruta_trazabilidad(pdf, carpeta_bd) for pdf in pdfs_de_la_ficha]
             archivos[fila] = [f"{r} (revisado, sin coincidencia)" for r in rutas_revisadas]
             detalles[fila], evidencias[fila] = [], []
-            observaciones[fila] = "No encontrada. PDF(s) revisado(s) de esta ficha: " + ", ".join(rutas_revisadas)
+            observaciones[fila] = (
+                "No encontrada. PDF(s) revisado(s) de esta ficha: "
+                + ", ".join(rutas_revisadas)
+            )
 
     return resultados, observaciones, archivos, detalles, evidencias
 
@@ -525,9 +598,12 @@ def escribir_hoja_reporte(wb, datos_fichas, resultados_globales, observ_globales
 
     for fila in range(2, ws.max_row + 1):
         for col in (6, 7, 8, 9):
-            ws.cell(fila, col).alignment = openpyxl.styles.Alignment(wrap_text=True, vertical="top")
+            ws.cell(fila, col).alignment = openpyxl.styles.Alignment(
+                wrap_text=True, vertical="top"
+            )
 
-    anchos = {"A": 14, "B": 8, "C": 10, "D": 45, "E": 16, "F": 45, "G": 40, "H": 26, "I": 60}
+    anchos = {"A": 14, "B": 8, "C": 10, "D": 45, "E": 16,
+              "F": 45, "G": 40, "H": 26, "I": 60}
     for columna, ancho in anchos.items():
         ws.column_dimensions[columna].width = ancho
 
@@ -542,10 +618,6 @@ def procesar(
     salida_dir: Path,
     progress_callback: ProgressCallback = None,
 ) -> dict:
-    """
-    Ejecuta el proceso completo y devuelve un dict con la ruta del archivo
-    generado y un resumen de estadísticas (para mostrar en la web).
-    """
     if not archivo_excel.exists():
         raise FileNotFoundError(f"No se encontró el Excel: {archivo_excel}")
 
@@ -570,59 +642,106 @@ def procesar(
                 filas_validas.append((fila, codigo, frase, valor_original))
         datos_fichas[ficha] = filas_validas
 
-    _notificar(progress_callback, f"Buscando números de ficha dentro de {len(todos_los_pdfs)} PDF(s)…", 0, 1)
+    total_fichas = len(datos_fichas)
 
-    # El caché se comparte con construir_mapa_ficha_pdf: los PDF que se
-    # abren para verificar el número de ficha no se vuelven a leer luego
-    # durante el análisis de competencias.
-    cache_pdfs: dict = {}
-    mapa_ficha_pdf, pdfs_omitidos = construir_mapa_ficha_pdf(
-        list(datos_fichas.keys()),
-        todos_los_pdfs,
-        cache_pdfs=cache_pdfs,
+    _notificar(
+        progress_callback,
+        f"Buscando números de ficha dentro de {len(todos_los_pdfs)} PDF(s)…",
+        0, 1,
     )
 
-    fichas_sin_pdf = [f for f, pdfs in mapa_ficha_pdf.items() if not pdfs]
-    fichas_con_pdf = [f for f, pdfs in mapa_ficha_pdf.items() if pdfs]
+    cache = PDFCache(max_workers=NUM_WORKERS_PDF)
+    try:
+        # 1) Pre-carga paralela + construcción del mapa ficha -> PDF.
+        mapa_ficha_pdf, pdfs_omitidos = construir_mapa_ficha_pdf(
+            list(datos_fichas.keys()),
+            todos_los_pdfs,
+            cache=cache,
+        )
 
-    resultados_globales, observ_globales = {}, {}
-    archivos_globales, detalles_globales, evidencias_globales = {}, {}, {}
+        fichas_sin_pdf = [f for f, pdfs in mapa_ficha_pdf.items() if not pdfs]
+        fichas_con_pdf = [f for f, pdfs in mapa_ficha_pdf.items() if pdfs]
 
-    total_fichas = len(datos_fichas)
-    for indice, (ficha, filas_validas) in enumerate(datos_fichas.items(), start=1):
-        _notificar(progress_callback, f"Analizando ficha {ficha} ({indice}/{total_fichas})…", indice, total_fichas)
-        r, o, a, d, e = analizar_ficha(ficha, filas_validas, mapa_ficha_pdf.get(ficha, []), cache_pdfs, carpeta_bd)
-        resultados_globales[ficha] = r
-        observ_globales[ficha] = o
-        archivos_globales[ficha] = a
-        detalles_globales[ficha] = d
-        evidencias_globales[ficha] = e
+        resultados_globales, observ_globales = {}, {}
+        archivos_globales, detalles_globales, evidencias_globales = {}, {}, {}
 
-    total_programado = 0
-    total_no_programado = 0
+        # 2) Análisis de fichas en paralelo. Cada worker usa el cache
+        #    ya caliente, así que la lectura de PDFs no se repite.
+        _notificar(
+            progress_callback,
+            f"Analizando {total_fichas} fichas en paralelo "
+            f"({NUM_WORKERS_FICHAS} hilos)…",
+            0, total_fichas,
+        )
 
-    for ws in wb.worksheets:
-        ficha = str(ws.title).strip()
-        resultados = resultados_globales.get(ficha, {})
+        completadas = 0
+        with ThreadPoolExecutor(
+            max_workers=NUM_WORKERS_FICHAS, thread_name_prefix="np-ficha"
+        ) as pool:
+            futuros = {}
+            for ficha, filas_validas in datos_fichas.items():
+                fut = pool.submit(
+                    analizar_ficha,
+                    ficha,
+                    filas_validas,
+                    mapa_ficha_pdf.get(ficha, []),
+                    cache,
+                    carpeta_bd,
+                )
+                futuros[fut] = ficha
 
-        ws.cell(4, COL_ESTADO).value = "Estado Programación"
-        for col in (COL_OBSERVACION, COL_ARCHIVOS, COL_DETALLE, COL_EVIDENCIA):
-            ws.cell(4, col).value = None
+            for fut in as_completed(futuros):
+                ficha = futuros[fut]
+                try:
+                    r, o, a, d, e = fut.result()
+                except Exception as exc:
+                    # Una ficha que falle no debe tumbar el resto.
+                    resultados_globales[ficha] = {}
+                    observ_globales[ficha] = {}
+                    archivos_globales[ficha] = {}
+                    detalles_globales[ficha] = {}
+                    evidencias_globales[ficha] = {}
+                    print(f"[no_programados] Error en ficha {ficha}: {exc}")
+                else:
+                    resultados_globales[ficha] = r
+                    observ_globales[ficha] = o
+                    archivos_globales[ficha] = a
+                    detalles_globales[ficha] = d
+                    evidencias_globales[ficha] = e
 
-        for fila in range(FILA_INICIO_DATOS, ws.max_row + 1):
+                completadas += 1
+                _notificar(
+                    progress_callback,
+                    f"Ficha {ficha} analizada ({completadas}/{total_fichas})…",
+                    completadas, total_fichas,
+                )
+
+        total_programado = 0
+        total_no_programado = 0
+
+        for ws in wb.worksheets:
+            ficha = str(ws.title).strip()
+            resultados = resultados_globales.get(ficha, {})
+
+            ws.cell(4, COL_ESTADO).value = "Estado Programación"
             for col in (COL_OBSERVACION, COL_ARCHIVOS, COL_DETALLE, COL_EVIDENCIA):
-                ws.cell(fila, col).value = None
-            if fila not in resultados:
-                continue
-            if resultados[fila]:
-                ws.cell(4, COL_ESTADO).value = "Estado Programación"
-                ws.cell(fila, COL_ESTADO).value = "PROGRAMADO"
-                total_programado += 1
-            else:
-                ws.cell(fila, COL_ESTADO).value = "NO PROGRAMADO"
-                total_no_programado += 1
+                ws.cell(4, col).value = None
 
-        reordenar_filas_por_estado(ws, resultados)
+            for fila in range(FILA_INICIO_DATOS, ws.max_row + 1):
+                for col in (COL_OBSERVACION, COL_ARCHIVOS, COL_DETALLE, COL_EVIDENCIA):
+                    ws.cell(fila, col).value = None
+                if fila not in resultados:
+                    continue
+                if resultados[fila]:
+                    ws.cell(fila, COL_ESTADO).value = "PROGRAMADO"
+                    total_programado += 1
+                else:
+                    ws.cell(fila, COL_ESTADO).value = "NO PROGRAMADO"
+                    total_no_programado += 1
+
+            reordenar_filas_por_estado(ws, resultados)
+    finally:
+        cache.shutdown()
 
     _notificar(progress_callback, "Generando hoja de reporte…", total_fichas, total_fichas)
     escribir_hoja_reporte(wb, datos_fichas, resultados_globales, observ_globales,
@@ -649,8 +768,6 @@ def procesar(
         "fichas_con_pdf": fichas_con_pdf,
         "total_programado": total_programado,
         "total_no_programado": total_no_programado,
-
-        # Trazabilidad: qué PDF quedó asignado a qué ficha y qué se omitió.
         "mapa_ficha_pdf": {
             ficha: [_rel(p) for p in pdfs]
             for ficha, pdfs in mapa_ficha_pdf.items()
