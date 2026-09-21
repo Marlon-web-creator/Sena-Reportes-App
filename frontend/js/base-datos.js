@@ -7,6 +7,12 @@ let pestanaActiva = "subidos";
 let carpetaActualId = null;
 let rutaActual = [{ id: null, nombre: "Raíz" }];
 
+// Estado de selección múltiple por pestaña.
+// Subidos: Set de IDs numéricos.
+// Generados: Set de strings "ejecucionId::clave".
+const seleccionadosSubidos = new Set();
+const seleccionadosGenerados = new Set();
+
 /* ============================================================
    PESTAÑAS
    ============================================================ */
@@ -26,6 +32,9 @@ document.querySelectorAll(".db-tab").forEach((btn) => {
     pestanaActiva = btn.dataset.tab;
 
     document.getElementById(`tab-${pestanaActiva}`).classList.add("active");
+
+    // Al cambiar de pestaña, refrescamos el contador del botón "Eliminar seleccionados".
+    actualizarContadorSeleccion();
   });
 });
 
@@ -81,6 +90,161 @@ function iconoNuevaCarpeta() {
       <path d="M10 13h4" />
     </svg>
   `;
+}
+
+
+/* ============================================================
+   SELECCIÓN MÚLTIPLE
+   ============================================================ */
+
+/** Devuelve el Set de selección correspondiente a la pestaña activa. */
+function conjuntoActivo() {
+  return pestanaActiva === "subidos"
+    ? seleccionadosSubidos
+    : seleccionadosGenerados;
+}
+
+/** Actualiza el contador y habilita/deshabilita el botón de eliminar seleccionados. */
+function actualizarContadorSeleccion() {
+  const n = conjuntoActivo().size;
+
+  const span = document.getElementById("contador-seleccionados");
+  if (span) span.textContent = n;
+
+  const btn = document.getElementById("btn-eliminar-seleccionados");
+  if (btn) btn.disabled = n === 0;
+}
+
+/** Sincroniza el checkbox "seleccionar todo" de una tabla con el estado de las filas. */
+function sincronizarCheckTodos(tabla) {
+  const chkTodos = document.querySelector(
+    `.check-todos[data-tabla="${tabla}"]`
+  );
+  if (!chkTodos) return;
+
+  const selector =
+    tabla === "subidos" ? ".check-fila-subido" : ".check-fila-generado";
+
+  const filas = document.querySelectorAll(selector);
+
+  if (!filas.length) {
+    chkTodos.checked = false;
+    chkTodos.indeterminate = false;
+    return;
+  }
+
+  const marcadas = Array.from(filas).filter((c) => c.checked).length;
+
+  chkTodos.checked = marcadas === filas.length;
+  chkTodos.indeterminate = marcadas > 0 && marcadas < filas.length;
+}
+
+/* "Seleccionar todo" en cada tabla */
+document.querySelectorAll(".check-todos").forEach((chk) => {
+  chk.addEventListener("change", () => {
+    const tabla = chk.dataset.tabla;
+    const selector =
+      tabla === "subidos" ? ".check-fila-subido" : ".check-fila-generado";
+
+    document.querySelectorAll(selector).forEach((c) => {
+      c.checked = chk.checked;
+      // Disparamos el change para que se actualicen los Sets y el contador.
+      c.dispatchEvent(new Event("change"));
+    });
+  });
+});
+
+/* Botón "Eliminar seleccionados" */
+const btnEliminarSeleccionados = document.getElementById(
+  "btn-eliminar-seleccionados"
+);
+
+if (btnEliminarSeleccionados) {
+  btnEliminarSeleccionados.addEventListener("click", async () => {
+    const esSubidos = pestanaActiva === "subidos";
+    const total = esSubidos
+      ? seleccionadosSubidos.size
+      : seleccionadosGenerados.size;
+
+    if (!total) return;
+
+    const etiqueta = esSubidos
+      ? "archivo(s) subido(s)"
+      : "archivo(s) generado(s)";
+
+    const ok = await confirmar({
+      titulo: `¿Eliminar ${total} ${etiqueta}?`,
+      mensaje:
+        "Se borrarán los registros y los archivos físicos del disco. " +
+        "Esta acción no se puede deshacer.",
+      textoConfirmar: "Eliminar",
+      peligro: true,
+    });
+
+    if (!ok) return;
+
+    btnEliminarSeleccionados.disabled = true;
+
+    try {
+      if (esSubidos) {
+        const ids = Array.from(seleccionadosSubidos);
+
+        const resultados = await Promise.allSettled(
+          ids.map((id) =>
+            apiFetch(`${API}/subidos/${id}`, { method: "DELETE" })
+              .then(leerRespuesta)
+          )
+        );
+
+        const okCount = resultados.filter((r) => r.status === "fulfilled").length;
+        const failCount = resultados.length - okCount;
+
+        seleccionadosSubidos.clear();
+
+        notificar(
+          failCount === 0
+            ? `${okCount} archivo(s) eliminado(s)`
+            : `Eliminados: ${okCount}. Fallaron: ${failCount}`,
+          failCount === 0 ? "success" : "error"
+        );
+
+        await cargarSubidos();
+      } else {
+        const claves = Array.from(seleccionadosGenerados).map((k) => {
+          const [ejecucion, ...resto] = k.split("::");
+          return { ejecucion, clave: resto.join("::") };
+        });
+
+        const resultados = await Promise.allSettled(
+          claves.map(({ ejecucion, clave }) =>
+            apiFetch(
+              `${API}/generados/${ejecucion}/${encodeURIComponent(clave)}`,
+              { method: "DELETE" }
+            ).then(leerRespuesta)
+          )
+        );
+
+        const okCount = resultados.filter((r) => r.status === "fulfilled").length;
+        const failCount = resultados.length - okCount;
+
+        seleccionadosGenerados.clear();
+
+        notificar(
+          failCount === 0
+            ? `${okCount} archivo(s) eliminado(s)`
+            : `Eliminados: ${okCount}. Fallaron: ${failCount}`,
+          failCount === 0 ? "success" : "error"
+        );
+
+        await cargarGenerados();
+      }
+    } catch (err) {
+      console.error("Error en eliminación múltiple:", err);
+      notificar(`No se pudo eliminar la selección: ${err.message}`, "error");
+    } finally {
+      actualizarContadorSeleccion();
+    }
+  });
 }
 
 
@@ -331,10 +495,24 @@ async function cargarSubidos() {
 
     const opciones = await obtenerOpcionesCarpetas();
 
+    // Limpiamos selección que ya no existe en la vista actual.
+    const idsActuales = new Set(data.map((f) => f.id));
+    for (const id of Array.from(seleccionadosSubidos)) {
+      if (!idsActuales.has(id)) seleccionadosSubidos.delete(id);
+    }
+
     const tbody = document.getElementById("tabla-subidos");
 
     tbody.innerHTML = data.map((f) => `
       <tr>
+        <td class="col-check">
+          <input
+            type="checkbox"
+            class="check-fila-subido"
+            data-id="${f.id}"
+            ${seleccionadosSubidos.has(f.id) ? "checked" : ""}
+          />
+        </td>
         <td>${esc(f.nombre_original)}</td>
         <td>${esc(f.modulo || "-")}</td>
         <td>${formatBytes(f.tamano_bytes)}</td>
@@ -365,6 +543,18 @@ async function cargarSubidos() {
         </td>
       </tr>
     `).join("");
+
+    // Checkboxes de fila
+    tbody.querySelectorAll(".check-fila-subido").forEach((chk) => {
+      chk.addEventListener("change", () => {
+        const id = Number(chk.dataset.id);
+        if (chk.checked) seleccionadosSubidos.add(id);
+        else seleccionadosSubidos.delete(id);
+
+        sincronizarCheckTodos("subidos");
+        actualizarContadorSeleccion();
+      });
+    });
 
     tbody.querySelectorAll(".select-mover-archivo").forEach((sel) => {
       sel.addEventListener("change", () => {
@@ -401,6 +591,9 @@ async function cargarSubidos() {
             "success"
           );
 
+          seleccionadosSubidos.delete(Number(btn.dataset.id));
+          actualizarContadorSeleccion();
+
           await cargarSubidos();
 
         } catch (err) {
@@ -416,6 +609,9 @@ async function cargarSubidos() {
         }
       });
     });
+
+    sincronizarCheckTodos("subidos");
+    actualizarContadorSeleccion();
 
   } catch (err) {
     console.error(
@@ -466,40 +662,72 @@ async function cargarGenerados() {
     const res = await apiFetch(`${API}/generados`);
     const data = await leerRespuesta(res);
 
+    // Limpiamos selección que ya no existe en la vista actual.
+    const clavesActuales = new Set(
+      data.map((f) => `${f.ejecucion_id}::${f.clave}`)
+    );
+    for (const k of Array.from(seleccionadosGenerados)) {
+      if (!clavesActuales.has(k)) seleccionadosGenerados.delete(k);
+    }
+
     const tbody = document.getElementById("tabla-generados");
 
-    tbody.innerHTML = data.map((f) => `
-      <tr>
-        <td>${esc(f.modulo)}</td>
-        <td>${esc(f.nombre_archivo)}</td>
-        <td>${esc(f.fecha)}</td>
-        <td>
-          ${f.existe ? "Disponible" : "No encontrado"}
-        </td>
-        <td>
+    tbody.innerHTML = data.map((f) => {
+      const claveFila = `${f.ejecucion_id}::${f.clave}`;
 
-          ${
-            f.existe
-              ? `
-                <a href="${API}/generados/${f.ejecucion_id}/${f.clave}/descargar">
-                  Descargar
-                </a>
-              `
-              : ""
-          }
+      return `
+        <tr>
+          <td class="col-check">
+            <input
+              type="checkbox"
+              class="check-fila-generado"
+              data-key="${esc(claveFila)}"
+              ${seleccionadosGenerados.has(claveFila) ? "checked" : ""}
+            />
+          </td>
+          <td>${esc(f.modulo)}</td>
+          <td>${esc(f.nombre_archivo)}</td>
+          <td>${esc(f.fecha)}</td>
+          <td>
+            ${f.existe ? "Disponible" : "No encontrado"}
+          </td>
+          <td>
 
-          <button
-            type="button"
-            data-ejecucion="${f.ejecucion_id}"
-            data-clave="${esc(f.clave)}"
-            class="btn-eliminar-generado"
-          >
-            Eliminar
-          </button>
+            ${
+              f.existe
+                ? `
+                  <a href="${API}/generados/${f.ejecucion_id}/${f.clave}/descargar">
+                    Descargar
+                  </a>
+                `
+                : ""
+            }
 
-        </td>
-      </tr>
-    `).join("");
+            <button
+              type="button"
+              data-ejecucion="${f.ejecucion_id}"
+              data-clave="${esc(f.clave)}"
+              class="btn-eliminar-generado"
+            >
+              Eliminar
+            </button>
+
+          </td>
+        </tr>
+      `;
+    }).join("");
+
+    // Checkboxes de fila
+    tbody.querySelectorAll(".check-fila-generado").forEach((chk) => {
+      chk.addEventListener("change", () => {
+        const k = chk.dataset.key;
+        if (chk.checked) seleccionadosGenerados.add(k);
+        else seleccionadosGenerados.delete(k);
+
+        sincronizarCheckTodos("generados");
+        actualizarContadorSeleccion();
+      });
+    });
 
     tbody
       .querySelectorAll(".btn-eliminar-generado")
@@ -533,6 +761,11 @@ async function cargarGenerados() {
               "success"
             );
 
+            seleccionadosGenerados.delete(
+              `${btn.dataset.ejecucion}::${btn.dataset.clave}`
+            );
+            actualizarContadorSeleccion();
+
             await cargarGenerados();
 
           } catch (err) {
@@ -548,6 +781,9 @@ async function cargarGenerados() {
           }
         });
       });
+
+    sincronizarCheckTodos("generados");
+    actualizarContadorSeleccion();
 
   } catch (err) {
     console.error(
@@ -647,12 +883,16 @@ document
       if (esSubidos) {
         carpetaActualId = null;
         rutaActual = [{ id: null, nombre: "Raíz" }];
+        seleccionadosSubidos.clear();
         renderBreadcrumb();
 
         await cargarTodo();
       } else {
+        seleccionadosGenerados.clear();
         await cargarGenerados();
       }
+
+      actualizarContadorSeleccion();
 
     } catch (err) {
 
@@ -811,6 +1051,7 @@ async function cargarTodo() {
 renderBreadcrumb();
 cargarTodo();
 cargarGenerados();
+actualizarContadorSeleccion();
 
 /* ============================================================
    BOTÓN "SALIR" (logout)

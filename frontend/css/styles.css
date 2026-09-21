@@ -1457,3 +1457,28 @@ a { color: var(--accent); }
   from { opacity: 0; transform: translateY(6px) scale(0.99); }
   to   { opacity: 1; transform: translateY(0)    scale(1);    }
 }
+
+/* ============================================================
+   Selección múltiple en tablas de Base de Datos
+   ============================================================ */
+
+.db-table .col-check {
+  width: 36px;
+  text-align: center;
+  padding-left: 8px;
+  padding-right: 4px;
+}
+
+.db-table .col-check input[type="checkbox"] {
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  accent-color: #2f6f4e; /* color SENA aprox.; ajústalo si quieres */
+}
+
+/* Botón "Eliminar seleccionados" cuando está deshabilitado */
+.db-tab-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
