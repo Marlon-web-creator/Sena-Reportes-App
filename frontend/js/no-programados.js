@@ -1,7 +1,5 @@
 // no-programados.js — lógica de la página del módulo Verificador No Programados
 
-const inputExcel = document.getElementById("excel");
-const inputPdfs = document.getElementById("pdfs");
 const resumenEl = document.getElementById("resumenSeleccion");
 const btnProcesar = document.getElementById("btnProcesar");
 const bloqueProgreso = document.getElementById("bloqueProgreso");
@@ -12,50 +10,21 @@ const historialEl = document.getElementById("historial");
 
 let intervaloPolling = null;
 
-function actualizarResumen() {
-  const excel = inputExcel.files[0];
-  const pdfs = Array.from(inputPdfs.files).filter((f) => f.name.toLowerCase().endsWith(".pdf"));
-  resumenEl.textContent = excel
-    ? `${excel.name} · ${pdfs.length} PDF(s) detectados en la carpeta`
-    : "";
-}
-
-inputExcel.addEventListener("change", actualizarResumen);
-inputPdfs.addEventListener("change", actualizarResumen);
-
 btnProcesar.addEventListener("click", async () => {
-  const excel = inputExcel.files[0];
-  const pdfs = Array.from(inputPdfs.files).filter((f) => f.name.toLowerCase().endsWith(".pdf"));
-
-  if (!excel) {
-    notificar("Selecciona el Consolidado General (.xlsx).", "warning");
-    return;
-  }
-  if (pdfs.length === 0) {
-    notificar("Selecciona la carpeta BD con al menos un PDF.", "warning");
-    return;
-  }
-
-  const formData = new FormData();
-  formData.append("excel", excel);
-  // webkitRelativePath conserva la subcarpeta (ej. "BD/2904878/reporte.pdf"),
-  // que es justo lo que el backend usa para relacionar cada PDF con su ficha.
-  pdfs.forEach((pdf) => {
-    const rutaRelativa = pdf.webkitRelativePath || pdf.name;
-    formData.append("pdfs", pdf, rutaRelativa);
-  });
-
   btnProcesar.disabled = true;
   bloqueProgreso.classList.remove("oculto");
   barraProgreso.style.width = "0%";
-  mensajeProgreso.textContent = "Subiendo archivos…";
+  mensajeProgreso.textContent = "Buscando archivos en Base de Datos…";
   resultadoEl.innerHTML = "<p class='placeholder'>Procesando…</p>";
 
   try {
-    const { id_ejecucion } = await apiPost("/api/no-programados", formData);
+    // El endpoint ya no recibe archivos: toma el Excel y los PDFs
+    // directamente de la sección "Base de Datos" (módulo "no_programados").
+    const { id_ejecucion } = await apiPost("/api/no-programados");
     notificar("Procesamiento iniciado.", "info");
     iniciarPolling(id_ejecucion);
   } catch (err) {
+    // Los mensajes 400 del backend ya explican qué falta (Excel, PDFs, etc.)
     notificar(err.message || "No se pudo iniciar el procesamiento.", "error");
     btnProcesar.disabled = false;
     bloqueProgreso.classList.add("oculto");

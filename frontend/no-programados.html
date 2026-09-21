@@ -17,17 +17,11 @@
     <section class="panel">
       <h2>1. Configuración</h2>
 
-      <label class="field">
-        <span>Consolidado General (.xlsx)</span>
-        <input type="file" id="excel" accept=".xlsx,.xlsm" />
-      </label>
-
-      <label class="field">
-        <span>Carpeta BD con los PDFs (una subcarpeta por ficha)</span>
-        <input type="file" id="pdfs" webkitdirectory directory multiple />
-      </label>
       <p class="field folder-hint">
-        Selecciona la carpeta "BD" completa (con sus subcarpetas por ficha). El navegador subirá todos los PDF que contenga.
+        Este módulo usa automáticamente lo que ya esté subido en la sección
+        <strong>Base de Datos</strong> con el módulo <strong>"No Programados"</strong>:
+        el Consolidado General (.xlsx) y los PDFs (organizados en subcarpetas
+        por ficha, si aplica). Si falta algo, súbelo primero desde esa sección.
       </p>
 
       <div id="resumenSeleccion" class="file-list"></div>

@@ -652,6 +652,30 @@ def listar_archivos_subidos(carpeta_id: int | None = None) -> list[dict]:
     return [dict(fila) for fila in filas]
 
 
+def listar_archivos_por_modulo(modulo: str) -> list[dict]:
+    """
+    Devuelve TODOS los archivos subidos etiquetados con un módulo
+    específico (ej. "no_programados"), sin importar en qué carpeta
+    estén ni cuándo se subieron.
+
+    Pensado para módulos que ya no reciben archivos adjuntos en su
+    propio formulario, sino que toman directamente lo que haya en la
+    sección "Base de Datos" con ese módulo asignado.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM archivos_subidos WHERE modulo = %s ORDER BY id",
+                (modulo,),
+            )
+            filas = cur.fetchall()
+    finally:
+        conn.close()
+
+    return [dict(f) for f in filas]
+
+
 def obtener_archivo_subido(archivo_id: int) -> dict | None:
     """
     Obtiene un archivo subido por su ID.

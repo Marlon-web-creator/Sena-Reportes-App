@@ -5,11 +5,18 @@ Endpoints del módulo "Verificador No Programados". El procesamiento corre
 en un hilo aparte: el POST devuelve de inmediato un id_ejecucion, y el
 frontend consulta /progreso/{id} cada cierto tiempo.
 
-Entrada/intermedios (excel + PDFs) en carpeta temporal. Como el
-procesamiento sigue corriendo en segundo plano después de responder el
-POST, la carpeta temporal se borra DENTRO del hilo (en su finally), no
-en el endpoint. El archivo de RESULTADO se sube a Supabase Storage antes
-de marcar la ejecución como terminada.
+CAMBIO: este módulo YA NO recibe el Excel ni los PDFs como adjuntos del
+formulario. En su lugar, toma TODO lo que haya en la sección "Base de
+Datos" etiquetado con el módulo "no_programados" (el campo `modulo` que
+ya se asigna ahí al subir archivos): debe haber exactamente un Excel
+(.xlsx/.xlsm) y al menos un PDF con ese módulo. El endpoint POST ya no
+recibe ningún parámetro.
+
+Entrada/intermedios (excel + PDFs) en carpeta temporal, descargados
+desde Supabase Storage. Como el procesamiento sigue corriendo en segundo
+plano después de responder el POST, la carpeta temporal se borra DENTRO
+del hilo (en su finally), no en el endpoint. El archivo de RESULTADO se
+sube a Supabase Storage antes de marcar la ejecución como terminada.
 """
 
 import shutil
@@ -18,12 +25,17 @@ import threading
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 
 import progreso
 import supabase_storage
-from database import guardar_ejecucion, listar_ejecuciones
+from database import (
+    guardar_ejecucion,
+    listar_archivos_por_modulo,
+    listar_ejecuciones,
+    obtener_ruta_carpeta,
+)
 from modules import no_programados
 
 router = APIRouter(prefix="/api/no-programados", tags=["No Programados"])
@@ -41,6 +53,23 @@ def _ruta_segura(base: Path, nombre_relativo: str) -> Path:
     return destino
 
 
+def _ruta_local_para_archivo(carpeta_bd: Path, archivo: dict) -> Path:
+    """
+    Reconstruye, dentro de la carpeta temporal, la misma ruta de
+    subcarpetas que el archivo tiene en la sección "Base de Datos"
+    (carpeta_id -> nombre).
+
+    Esto es importante porque no_programados.construir_mapa_ficha_pdf()
+    empareja cada PDF con su ficha mirando los NOMBRES DE CARPETA en la
+    ruta (ej. BD/2904878/archivo.pdf). Si los PDFs están organizados en
+    subcarpetas por ficha dentro de "Base de Datos", esa organización se
+    respeta igual que antes, cuando se subía la carpeta completa.
+    """
+    ruta_carpetas = obtener_ruta_carpeta(archivo["carpeta_id"])
+    subcarpetas = [c["nombre"] for c in ruta_carpetas]
+    return _ruta_segura(carpeta_bd, "/".join(subcarpetas + [archivo["nombre_original"]]))
+
+
 def _subir_generado(ruta_local, id_ejecucion: str) -> str:
     """
     Sube el archivo resultado (hoy en la carpeta temporal local) a
@@ -53,14 +82,51 @@ def _subir_generado(ruta_local, id_ejecucion: str) -> str:
 
 
 @router.post("")
-async def iniciar_procesamiento(
-    excel: UploadFile = File(...),
-    pdfs: list[UploadFile] = File(...),
-):
-    if not excel.filename.lower().endswith((".xlsx", ".xlsm")):
-        raise HTTPException(status_code=400, detail="El consolidado debe ser .xlsx o .xlsm.")
-    if not pdfs:
-        raise HTTPException(status_code=400, detail="Debes subir al menos un PDF.")
+async def iniciar_procesamiento():
+    """
+    Ya no recibe archivos: toma el Excel y los PDFs directamente de la
+    sección "Base de Datos", filtrando por modulo = "no_programados".
+    """
+    archivos = listar_archivos_por_modulo(NOMBRE_MODULO)
+
+    archivos_excel = [
+        a for a in archivos
+        if a["nombre_original"].lower().endswith((".xlsx", ".xlsm"))
+    ]
+    archivos_pdf = [
+        a for a in archivos
+        if a["nombre_original"].lower().endswith(".pdf")
+    ]
+
+    if not archivos_excel:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No hay ningún Excel (.xlsx/.xlsm) en la Base de Datos "
+                "con el módulo 'No Programados'. Súbelo primero desde "
+                "esa sección."
+            ),
+        )
+    if len(archivos_excel) > 1:
+        nombres = ", ".join(a["nombre_original"] for a in archivos_excel)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Hay más de un Excel en la Base de Datos con el módulo "
+                f"'No Programados' ({nombres}). Deja solo el Consolidado "
+                "vigente y elimina el resto."
+            ),
+        )
+    if not archivos_pdf:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No hay ningún PDF en la Base de Datos con el módulo "
+                "'No Programados'. Súbelos primero desde esa sección."
+            ),
+        )
+
+    archivo_excel_registro = archivos_excel[0]
 
     id_ejecucion = uuid.uuid4().hex[:10]
     carpeta_temporal = Path(tempfile.mkdtemp(prefix=f"no_programados_{id_ejecucion}_"))
@@ -71,25 +137,35 @@ async def iniciar_procesamiento(
     carpeta_salida.mkdir(parents=True, exist_ok=True)
 
     try:
-        ruta_excel = carpeta_entrada / excel.filename
-        with ruta_excel.open("wb") as f:
-            shutil.copyfileobj(excel.file, f)
+        ruta_excel = carpeta_entrada / archivo_excel_registro["nombre_original"]
+        ruta_excel.write_bytes(
+            supabase_storage.descargar_bytes(archivo_excel_registro["ruta"])
+        )
 
         pdfs_guardados = 0
-        for pdf in pdfs:
-            if not pdf.filename.lower().endswith(".pdf"):
-                continue
+        pdfs_fallidos = []
+        for pdf in archivos_pdf:
             try:
-                destino = _ruta_segura(carpeta_bd, pdf.filename)
+                destino = _ruta_local_para_archivo(carpeta_bd, pdf)
             except ValueError:
+                pdfs_fallidos.append(pdf["nombre_original"])
                 continue
             destino.parent.mkdir(parents=True, exist_ok=True)
-            with destino.open("wb") as f:
-                shutil.copyfileobj(pdf.file, f)
+            try:
+                destino.write_bytes(supabase_storage.descargar_bytes(pdf["ruta"]))
+            except Exception:
+                # Si un PDF puntual falla al descargar de Storage, se
+                # omite y se sigue con los demás en vez de tumbar todo
+                # el proceso.
+                pdfs_fallidos.append(pdf["nombre_original"])
+                continue
             pdfs_guardados += 1
 
         if pdfs_guardados == 0:
-            raise HTTPException(status_code=400, detail="Ninguno de los archivos subidos es un .pdf válido.")
+            raise HTTPException(
+                status_code=400,
+                detail="No se pudo descargar ningún PDF desde la Base de Datos.",
+            )
     except HTTPException:
         # El hilo nunca arranca, así que la limpieza es responsabilidad
         # de este endpoint.
@@ -115,10 +191,14 @@ async def iniciar_procesamiento(
                 # en BD y de avisar al frontend que ya terminó.
                 ruta_storage = _subir_generado(resultado["archivo_generado"], id_ejecucion)
                 resultado["archivo_generado"] = ruta_storage
+                resultado["pdfs_fallidos_al_descargar"] = pdfs_fallidos
 
                 guardar_ejecucion(
                     modulo=NOMBRE_MODULO,
-                    parametros={"excel": excel.filename, "n_pdfs": pdfs_guardados},
+                    parametros={
+                        "excel": archivo_excel_registro["nombre_original"],
+                        "n_pdfs": pdfs_guardados,
+                    },
                     resultado=resultado,
                     archivos_generados={"PROCESADO": ruta_storage},
                 )
