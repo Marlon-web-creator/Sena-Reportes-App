@@ -1,5 +1,6 @@
 // no-programados.js — lógica de la página del módulo Verificador No Programados
 
+const inputExcel = document.getElementById("excel");
 const resumenEl = document.getElementById("resumenSeleccion");
 const btnProcesar = document.getElementById("btnProcesar");
 const bloqueProgreso = document.getElementById("bloqueProgreso");
@@ -10,21 +11,38 @@ const historialEl = document.getElementById("historial");
 
 let intervaloPolling = null;
 
+function actualizarResumen() {
+  const excel = inputExcel.files[0];
+  resumenEl.textContent = excel ? excel.name : "";
+}
+
+inputExcel.addEventListener("change", actualizarResumen);
+
 btnProcesar.addEventListener("click", async () => {
+  const excel = inputExcel.files[0];
+
+  if (!excel) {
+    notificar("Selecciona el Consolidado General (.xlsx).", "warning");
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("excel", excel);
+
   btnProcesar.disabled = true;
   bloqueProgreso.classList.remove("oculto");
   barraProgreso.style.width = "0%";
-  mensajeProgreso.textContent = "Buscando archivos en Base de Datos…";
+  mensajeProgreso.textContent = "Subiendo Excel y buscando PDFs en Base de Datos…";
   resultadoEl.innerHTML = "<p class='placeholder'>Procesando…</p>";
 
   try {
-    // El endpoint ya no recibe archivos: toma el Excel y los PDFs
-    // directamente de la sección "Base de Datos" (módulo "no_programados").
-    const { id_ejecucion } = await apiPost("/api/no-programados");
+    // Los PDFs ya no viajan en el form: el backend los toma de la
+    // sección "Base de Datos" (módulo "no_programados").
+    const { id_ejecucion } = await apiPost("/api/no-programados", formData);
     notificar("Procesamiento iniciado.", "info");
     iniciarPolling(id_ejecucion);
   } catch (err) {
-    // Los mensajes 400 del backend ya explican qué falta (Excel, PDFs, etc.)
+    // Los mensajes 400 del backend ya explican qué falta (Excel válido, PDFs, etc.)
     notificar(err.message || "No se pudo iniciar el procesamiento.", "error");
     btnProcesar.disabled = false;
     bloqueProgreso.classList.add("oculto");
