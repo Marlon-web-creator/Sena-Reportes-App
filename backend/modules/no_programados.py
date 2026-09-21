@@ -6,12 +6,14 @@ Lógica de NoProgramados.py adaptada para la API web:
 - Ya no depende de carpetas fijas (BASE_DIR/BD, BASE_DIR/Consolidado_General.xlsx);
   recibe la ruta del Excel y la carpeta con los PDFs como parámetros.
 - Mejora de precisión: la detección de texto vs. OCR ahora se hace PÁGINA POR
-  PÁGINA en vez de por PDF completo. Antes, si un PDF tenía la mayoría de
-  páginas digitales pero una sola página escaneada, esa página se leía con
-  texto vacío y se perdía la competencia que estuviera solo ahí. Ahora cada
-  página decide individualmente si necesita OCR.
-- Acepta un `progress_callback(mensaje, actual, total)` opcional para poder
-  informar avance en tiempo real desde la API.
+  PÁGINA en vez de por PDF completo.
+- El emparejamiento PDF -> ficha se hace AHORA por CONTENIDO:
+    * Se ignora el nombre del archivo y las carpetas.
+    * Se abre cada PDF y se busca dentro el número de cada ficha del Excel.
+    * Un PDF se asigna a TODAS las fichas cuyo número aparezca dentro.
+    * Si dentro del PDF no aparece ningún número de ficha del Excel, el
+      PDF se omite (no contamina ninguna ficha).
+- Acepta un `progress_callback(mensaje, actual, total)` opcional.
 """
 
 import re
@@ -25,7 +27,7 @@ import fitz  # PyMuPDF
 import openpyxl
 
 # ============================================================
-# CONFIGURACIÓN (misma estructura de columnas que el script original)
+# CONFIGURACIÓN
 # ============================================================
 
 COL_CODIGO = 1
@@ -37,16 +39,21 @@ COL_OBSERVACION = 12
 COL_ARCHIVOS = 13
 COL_DETALLE = 14
 COL_EVIDENCIA = 15
-COL_DOCUMENTO = 4  # "Número de Documento": identifica a qué aprendiz pertenece cada fila
+COL_DOCUMENTO = 4  # "Número de Documento"
 
 IDIOMA_OCR = "spa"
 DPI_OCR = 200
-MIN_CARACTERES_TEXTO_PAGINA = 20  # umbral por página (antes era por PDF completo)
+MIN_CARACTERES_TEXTO_PAGINA = 20
 
 UMBRAL_SIMILITUD_VENTANA = 0.82
 UMBRAL_COBERTURA = 0.80
 UMBRAL_PALABRA = 0.88
 TAMANO_VENTANA_PALABRAS = 80
+
+# Mínimo de dígitos para que un número suelto en un PDF se considere
+# candidato a "número de ficha". Las fichas del SENA son de 7 dígitos;
+# 5 da margen y evita ruido de números cortos.
+MIN_DIGITOS_FICHA = 5
 
 COMPETENCIAS_FORZADAS_PROGRAMADO = {
     "RESULTADOS DE APRENDIZAJE ETAPA PRACTICA",
@@ -135,7 +142,7 @@ def fila_es_valida(ws, fila):
 
 
 # ============================================================
-# INVENTARIO Y RELACIÓN FICHA -> PDF
+# INVENTARIO Y RELACIÓN FICHA -> PDF (POR CONTENIDO)
 # ============================================================
 
 def obtener_todos_los_pdfs(carpeta_bd: Path) -> list[Path]:
@@ -145,45 +152,72 @@ def obtener_todos_los_pdfs(carpeta_bd: Path) -> list[Path]:
     return sorted(set(pdfs), key=lambda p: str(p).lower())
 
 
-def construir_mapa_ficha_pdf(fichas, todos_los_pdfs):
+def construir_mapa_ficha_pdf(
+    fichas,
+    todos_los_pdfs,
+    cache_pdfs: dict | None = None,
+):
     """
-    Asocia cada PDF con, como mucho, UNA ficha, recorriendo la lista de
-    PDFs una sola vez (en vez de una vez POR CADA ficha, que era el
-    cuello de botella real: con F fichas y P pdfs, la versión anterior
-    hacía F×P normalizaciones de texto completo de la ruta).
+    Asocia cada PDF a TODAS las fichas cuyo número aparezca DENTRO del
+    contenido del PDF.
 
-    Devuelve (mapa, pdfs_omitidos): los PDF que no correspondan al número
-    de ninguna ficha del Excel se listan en pdfs_omitidos y NUNCA se
-    abren ni se les hace OCR — se descartan aquí, antes de la parte cara
-    del proceso.
+    Reglas:
+      - Se IGNORAN el nombre del archivo y las carpetas.
+      - Se abre cada PDF (usando el caché compartido) y se busca, sobre
+        todo el texto normalizado (mayúsculas, sin tildes, sin puntuación),
+        cada número de ficha del Excel con límites de dígitos para evitar
+        que "2904878" matchee dentro de "29048789" o "12904878".
+      - Un mismo PDF puede quedar asignado a VARIAS fichas si dentro
+        aparecen varios números de ficha (por ejemplo, un consolidado).
+      - Si dentro del PDF no aparece ningún número de ficha del Excel,
+        se añade a `pdfs_omitidos` y NUNCA se usa para buscar
+        competencias (no contamina ninguna ficha).
+
+    Devuelve (mapa, pdfs_omitidos).
     """
-    fichas_norm = {normalizar_texto(f): f for f in fichas if normalizar_texto(f)}
-    fichas_digitos = {f: re.sub(r"\D", "", str(f)) for f in fichas}
+    if cache_pdfs is None:
+        cache_pdfs = {}
+
+    # Mapa "solo dígitos" -> nombre original de la ficha en el Excel.
+    # Sirve incluso si la ficha viene como "Ficha 2904878" o "F-2904878".
+    fichas_digitos: dict[str, str] = {}
+    for f in fichas:
+        digitos = re.sub(r"\D", "", str(f))
+        if digitos:
+            fichas_digitos[digitos] = f
+
+    # Regex para extraer números candidatos del texto de cada PDF.
+    patron_numero = re.compile(rf"(?<!\d)(\d{{{MIN_DIGITOS_FICHA},}})(?!\d)")
 
     mapa = {f: [] for f in fichas}
-    pdfs_omitidos = []
+    pdfs_omitidos: list[Path] = []
 
     for pdf in todos_los_pdfs:
-        partes_norm = [normalizar_texto(p) for p in pdf.parts]
+        if pdf not in cache_pdfs:
+            cache_pdfs[pdf] = cargar_pdf(pdf)
+        paginas, _ = cache_pdfs[pdf]
 
-        # 1) Caso ideal y más rápido: alguna carpeta del path coincide
-        #    EXACTO con el número de una ficha (ej. BD/2904878/archivo.pdf).
-        ficha_encontrada = next((fichas_norm[p] for p in partes_norm if p in fichas_norm), None)
-
-        # 2) Si no hubo coincidencia directa, se revisa si los dígitos de
-        #    alguna ficha aparecen en la ruta completa (más lento, pero
-        #    solo corre para los PDF que no calzaron con el caso ideal).
-        if ficha_encontrada is None:
-            ruta_str = str(pdf)
-            for ficha, digitos in fichas_digitos.items():
-                if digitos and re.search(rf"(?<!\d){re.escape(digitos)}(?!\d)", ruta_str):
-                    ficha_encontrada = ficha
-                    break
-
-        if ficha_encontrada is not None:
-            mapa[ficha_encontrada].append(pdf)
-        else:
+        if not paginas:
             pdfs_omitidos.append(pdf)
+            continue
+
+        # Todo el texto del PDF, ya normalizado, en una sola cadena.
+        texto_total = " ".join(p["normalizado"] for p in paginas)
+
+        # Sacar una sola vez todos los números ≥ MIN_DIGITOS_FICHA y ver
+        # cuáles coinciden con alguna ficha. Es O(números en el PDF), no
+        # O(fichas × PDFs).
+        numeros_encontrados = set(patron_numero.findall(texto_total))
+        fichas_encontradas = [
+            fichas_digitos[d] for d in numeros_encontrados if d in fichas_digitos
+        ]
+
+        if not fichas_encontradas:
+            pdfs_omitidos.append(pdf)
+            continue
+
+        for ficha in fichas_encontradas:
+            mapa[ficha].append(pdf)
 
     return mapa, pdfs_omitidos
 
@@ -204,9 +238,7 @@ def _ocr_pagina(pagina) -> str:
 def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
     """
     Devuelve la lista de páginas del PDF, decidiendo página por página si
-    hace falta OCR (más preciso que decidirlo para el PDF completo: un PDF
-    mixto —algunas páginas digitales, otras escaneadas— queda bien leído
-    en ambos tipos de página).
+    hace falta OCR.
     """
     paginas = []
     try:
@@ -219,8 +251,6 @@ def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
             if len(texto_normalizado) < MIN_CARACTERES_TEXTO_PAGINA and OCR_DISPONIBLE:
                 texto_ocr = _ocr_pagina(pagina)
                 texto_ocr_normalizado = normalizar_texto(texto_ocr)
-                # Se usa el que haya dado más contenido útil (normalmente el OCR
-                # en páginas escaneadas, el texto nativo en las digitales).
                 if len(texto_ocr_normalizado) > len(texto_normalizado):
                     texto_original, texto_normalizado, metodo = texto_ocr, texto_ocr_normalizado, "OCR"
 
@@ -241,7 +271,7 @@ def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
 
 
 # ============================================================
-# CTRL+F + SIMILITUD CONSERVADORA (por página, por ventanas)
+# CTRL+F + SIMILITUD CONSERVADORA
 # ============================================================
 
 def buscar_exactamente_en_pagina(texto_pagina, frase):
@@ -367,7 +397,7 @@ def analizar_pdf(pdf_path: Path, frase: str, cache_pdfs: dict, carpeta_bd: Path)
 
 
 # ============================================================
-# PROCESAR UNA FICHA (solo contra sus propios PDF)
+# PROCESAR UNA FICHA
 # ============================================================
 
 def analizar_ficha(ficha, filas_validas, pdfs_de_la_ficha, cache_pdfs, carpeta_bd):
@@ -408,7 +438,7 @@ def analizar_ficha(ficha, filas_validas, pdfs_de_la_ficha, cache_pdfs, carpeta_b
 
 
 # ============================================================
-# REORDENAR FILAS + HOJA DE REPORTE (idéntico al original)
+# REORDENAR FILAS + HOJA DE REPORTE
 # ============================================================
 
 def reordenar_filas_por_estado(ws, resultados):
@@ -540,12 +570,21 @@ def procesar(
                 filas_validas.append((fila, codigo, frase, valor_original))
         datos_fichas[ficha] = filas_validas
 
-    _notificar(progress_callback, f"Relacionando {len(todos_los_pdfs)} PDF(s) con las fichas…", 0, 1)
-    mapa_ficha_pdf, pdfs_omitidos = construir_mapa_ficha_pdf(list(datos_fichas.keys()), todos_los_pdfs)
+    _notificar(progress_callback, f"Buscando números de ficha dentro de {len(todos_los_pdfs)} PDF(s)…", 0, 1)
+
+    # El caché se comparte con construir_mapa_ficha_pdf: los PDF que se
+    # abren para verificar el número de ficha no se vuelven a leer luego
+    # durante el análisis de competencias.
+    cache_pdfs: dict = {}
+    mapa_ficha_pdf, pdfs_omitidos = construir_mapa_ficha_pdf(
+        list(datos_fichas.keys()),
+        todos_los_pdfs,
+        cache_pdfs=cache_pdfs,
+    )
 
     fichas_sin_pdf = [f for f, pdfs in mapa_ficha_pdf.items() if not pdfs]
+    fichas_con_pdf = [f for f, pdfs in mapa_ficha_pdf.items() if pdfs]
 
-    cache_pdfs = {}
     resultados_globales, observ_globales = {}, {}
     archivos_globales, detalles_globales, evidencias_globales = {}, {}, {}
 
@@ -576,6 +615,7 @@ def procesar(
             if fila not in resultados:
                 continue
             if resultados[fila]:
+                ws.cell(4, COL_ESTADO).value = "Estado Programación"
                 ws.cell(fila, COL_ESTADO).value = "PROGRAMADO"
                 total_programado += 1
             else:
@@ -593,6 +633,12 @@ def procesar(
 
     _notificar(progress_callback, "Listo.", total_fichas, total_fichas)
 
+    def _rel(p: Path) -> str:
+        try:
+            return str(p.relative_to(carpeta_bd))
+        except ValueError:
+            return str(p)
+
     return {
         "archivo_generado": str(ruta_salida),
         "ocr_disponible": OCR_DISPONIBLE,
@@ -600,6 +646,15 @@ def procesar(
         "total_pdfs_detectados": len(todos_los_pdfs),
         "total_pdfs_omitidos": len(pdfs_omitidos),
         "fichas_sin_pdf": fichas_sin_pdf,
+        "fichas_con_pdf": fichas_con_pdf,
         "total_programado": total_programado,
         "total_no_programado": total_no_programado,
+
+        # Trazabilidad: qué PDF quedó asignado a qué ficha y qué se omitió.
+        "mapa_ficha_pdf": {
+            ficha: [_rel(p) for p in pdfs]
+            for ficha, pdfs in mapa_ficha_pdf.items()
+            if pdfs
+        },
+        "pdfs_omitidos": [_rel(p) for p in pdfs_omitidos],
     }
