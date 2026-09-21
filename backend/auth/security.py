@@ -24,7 +24,7 @@ if not SESSION_SECRET or not APP_PASSWORD_HASH:
     )
 
 COOKIE_NAME = "sena_db_session"
-MAX_AGE = 60 * 60 * 8  # 8 horas
+MAX_AGE = 60 * 10  # ← 10 minutos.
 
 _serializer = URLSafeTimedSerializer(SESSION_SECRET, salt="sena-db")
 
