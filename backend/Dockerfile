@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# Instalar Tesseract OCR + el paquete de español
+# Tesseract OCR + español
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-spa \
@@ -8,12 +8,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Instalar las dependencias de Python
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# El contexto de build es la RAÍZ del repo (backend/ + frontend/).
+COPY backend/requirements.txt ./backend/requirements.txt
+RUN pip install --no-cache-dir -r ./backend/requirements.txt
 
-# Copiar el resto del código
-COPY . .
+COPY backend/ ./backend/
+COPY frontend/ ./frontend/
 
-# Render asigna el puerto en la variable PORT
+WORKDIR /app/backend
+
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}"]
