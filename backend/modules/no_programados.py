@@ -6,11 +6,9 @@ Lógica de NoProgramados.py adaptada para la API web.
 Novedades de esta versión:
 - Logs detallados en cada fase (indexado de PDFs, mapa ficha->PDF, análisis).
 - Caché LRU acotada: evita OOM en contenedores pequeños con 600+ PDFs.
-- Precarga con callback de progreso: el frontend ya no se queda "colgado"
-  durante la fase de lectura de PDFs.
-- OCR opcional por env var (NP_SKIP_OCR=1) y DPI configurable.
-- Fase de indexado separada de la fase de análisis: se libera la RAM de
-  los PDFs antes de empezar el análisis de fichas.
+- Precarga con callback de progreso y timeout por PDF.
+- OCR con timeout por página (pytesseract).
+- Fase de indexado separada de la fase de análisis.
 """
 
 import logging
@@ -20,7 +18,12 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+    as_completed,
+    TimeoutError as FuturesTimeout,
+)
 from copy import copy
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -29,7 +32,9 @@ from typing import Callable, Optional
 import fitz  # PyMuPDF
 import openpyxl
 
-# >>> LOGGING (una sola vez; idempotente si el módulo se recarga)
+# ============================================================
+# LOGGING
+# ============================================================
 logger = logging.getLogger("no_programados")
 if not logger.handlers:
     logger.setLevel(logging.INFO)
@@ -57,7 +62,6 @@ COL_EVIDENCIA = 15
 COL_DOCUMENTO = 4
 
 IDIOMA_OCR = "spa"
-# >>> DPI configurable para reducir tiempo de OCR si hace falta
 DPI_OCR = int(os.environ.get("NP_OCR_DPI") or 200)
 MIN_CARACTERES_TEXTO_PAGINA = 20
 
@@ -88,10 +92,12 @@ _CPU = os.cpu_count() or 4
 NUM_WORKERS_PDF = int(os.environ.get("NP_WORKERS_PDF") or min(8, _CPU * 2))
 NUM_WORKERS_FICHAS = int(os.environ.get("NP_WORKERS_FICHAS") or max(2, min(4, _CPU)))
 MAX_OCR_CONCURRENTES = int(os.environ.get("NP_MAX_OCR") or 2)
-# >>> Tamaño máximo de la caché LRU (en PDFs). 0 = ilimitado (¡peligro OOM!).
 PDF_CACHE_MAX_SIZE = int(os.environ.get("NP_CACHE_MAX") or 60)
-# >>> Permite desactivar OCR por completo si los PDFs ya son digitales.
 SKIP_OCR = os.environ.get("NP_SKIP_OCR", "").lower() in ("1", "true", "yes")
+
+# >>> Timeouts por PDF y por OCR (evitan cuelgues indefinidos)
+TIMEOUT_PDF_PRELOAD = float(os.environ.get("NP_TIMEOUT_PDF") or 120)
+TIMEOUT_OCR_POR_PAGINA = float(os.environ.get("NP_TIMEOUT_OCR") or 60)
 
 _OCR_SEMAPHORE = threading.Semaphore(MAX_OCR_CONCURRENTES)
 
@@ -107,9 +113,11 @@ except Exception as _e:
     logger.warning("OCR no disponible: %s", _e)
 
 logger.info(
-    "Config: workers_pdf=%d workers_fichas=%d max_ocr=%d cache_max=%s ocr=%s dpi=%d",
+    "Config: workers_pdf=%d workers_fichas=%d max_ocr=%d cache_max=%s "
+    "ocr=%s dpi=%d timeout_pdf=%.0fs timeout_ocr=%.0fs",
     NUM_WORKERS_PDF, NUM_WORKERS_FICHAS, MAX_OCR_CONCURRENTES,
     PDF_CACHE_MAX_SIZE or "ilimitado", OCR_DISPONIBLE, DPI_OCR,
+    TIMEOUT_PDF_PRELOAD, TIMEOUT_OCR_POR_PAGINA,
 )
 
 
@@ -183,19 +191,22 @@ def fila_es_valida(ws, fila):
 
 
 # ============================================================
-# CACHÉ DE PDFs — LRU + progreso
+# CACHÉ DE PDFs — LRU + progreso + timeout
 # ============================================================
 
 class PDFCache:
     """
     Caché LRU de PDFs cargados (texto + OCR). Thread-safe.
 
-    >>> CAMBIO CLAVE: `max_size` acota cuántos PDFs se mantienen en RAM.
-    Antes, con 600+ PDFs, la caché crecía sin límite y reventaba la
-    memoria del contenedor. Ahora se evictan los menos usados.
+    - `get(pdf)` devuelve el resultado ya cacheado o lanza la carga.
+    - Si dos hilos piden el MISMO pdf a la vez, solo se carga una vez.
+    - `preload(pdfs)` dispara la carga en paralelo con timeout por PDF
+      y reporta progreso al callback.
+    - `max_size` acota cuántos PDFs se mantienen en RAM (LRU).
     """
 
-    def __init__(self, max_workers: int = NUM_WORKERS_PDF, max_size: int = PDF_CACHE_MAX_SIZE):
+    def __init__(self, max_workers: int = NUM_WORKERS_PDF,
+                 max_size: int = PDF_CACHE_MAX_SIZE):
         self._cache: "OrderedDict[Path, tuple[list[dict], Optional[str]]]" = OrderedDict()
         self._futures: dict[Path, Future] = {}
         self._lock = threading.Lock()
@@ -229,8 +240,9 @@ class PDFCache:
 
     def preload(self, pdf_paths, progress_callback: ProgressCallback = None) -> None:
         """
-        Dispara la carga de varios PDFs en paralelo y espera.
-        >>> Ahora reporta progreso cada N PDFs, para que no parezca colgado.
+        Dispara la carga de varios PDFs en paralelo y espera a que terminen.
+        Con timeout por PDF: si uno se atasca, se marca como error y se sigue.
+        Reporta progreso cada 10 PDFs.
         """
         pendientes = []
         with self._lock:
@@ -257,21 +269,28 @@ class PDFCache:
         for fut in as_completed(fut_a_path.keys()):
             p = fut_a_path[fut]
             try:
-                resultado = fut.result()
+                resultado = fut.result(timeout=TIMEOUT_PDF_PRELOAD)
                 if not resultado[0]:
                     errores += 1
                     logger.warning("PDF sin contenido: %s (%s)", p.name, resultado[1])
+            except FuturesTimeout:
+                logger.error(
+                    "TIMEOUT: PDF %s excedió %.0fs — se omite",
+                    p.name, TIMEOUT_PDF_PRELOAD,
+                )
+                resultado = ([], f"Timeout de {TIMEOUT_PDF_PRELOAD:.0f}s")
+                errores += 1
             except Exception as e:
                 resultado = ([], f"Error cargando PDF: {e}")
                 errores += 1
                 logger.exception("Error cargando %s", p)
+
             with self._lock:
                 self._cache[p] = resultado
                 self._cache.move_to_end(p)
                 self._evictar_locked()
 
             completadas += 1
-            # >>> Log cada 10 PDFs (antes: silencio total durante minutos)
             if completadas % 10 == 0 or completadas == total:
                 seg = time.time() - inicio
                 v = completadas / seg if seg > 0 else 0
@@ -310,9 +329,7 @@ def construir_mapa_ficha_pdf(
 ):
     """
     Asocia cada PDF a TODAS las fichas cuyo número aparezca DENTRO del
-    contenido del PDF.
-
-    >>> CAMBIO: el callback de progreso se propaga a `cache.preload()`.
+    contenido del PDF (independiente del nombre del archivo).
     """
     fichas_digitos: dict[str, str] = {}
     for f in fichas:
@@ -322,14 +339,13 @@ def construir_mapa_ficha_pdf(
 
     patron_numero = re.compile(rf"(?<!\d)(\d{{{MIN_DIGITOS_FICHA},}})(?!\d)")
 
-    # >>> Aquí es donde antes se quedaba "colgado" sin decir nada.
     cache.preload(todos_los_pdfs, progress_callback=progress_callback)
 
     mapa = {f: [] for f in fichas}
     pdfs_omitidos: list[Path] = []
 
     inicio = time.time()
-    for i, pdf in enumerate(todos_los_pdfs, start=1):
+    for pdf in todos_los_pdfs:
         paginas, _ = cache.get(pdf)
         if not paginas:
             pdfs_omitidos.append(pdf)
@@ -349,7 +365,7 @@ def construir_mapa_ficha_pdf(
             mapa[ficha].append(pdf)
 
     logger.info(
-        "Mapa ficha->PDF: %d fichas, %d PDFs indexados, %d omitidos (%.1fs)",
+        "Mapa ficha->PDF: %d fichas con PDFs, %d PDFs indexados, %d omitidos (%.1fs)",
         sum(1 for v in mapa.values() if v), len(todos_los_pdfs),
         len(pdfs_omitidos), time.time() - inicio,
     )
@@ -367,21 +383,30 @@ def _ocr_pagina(pagina) -> str:
         matriz = fitz.Matrix(DPI_OCR / 72, DPI_OCR / 72)
         pix = pagina.get_pixmap(matrix=matriz, alpha=False)
         imagen = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        return pytesseract.image_to_string(imagen, lang=IDIOMA_OCR) or ""
+        try:
+            return pytesseract.image_to_string(
+                imagen, lang=IDIOMA_OCR, timeout=TIMEOUT_OCR_POR_PAGINA
+            ) or ""
+        except RuntimeError as e:
+            logger.warning("OCR timeout en página: %s", e)
+            return ""
 
 
 def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
     """
     Devuelve la lista de páginas del PDF, decidiendo página por página si
-    hace falta OCR.
+    hace falta OCR. Cada hilo abre SU PROPIO documento.
     """
     t0 = time.time()
     paginas = []
     paginas_con_ocr = 0
+    logger.info("Abriendo PDF: %s", pdf_path.name)
     try:
         documento = fitz.open(str(pdf_path))
+        logger.info("PDF abierto: %s (%d páginas)", pdf_path.name, documento.page_count)
         try:
             for numero, pagina in enumerate(documento, start=1):
+                t_pag = time.time()
                 texto_original = pagina.get_text("text") or ""
                 texto_normalizado = normalizar_texto(texto_original)
                 metodo = "TEXTO"
@@ -401,6 +426,11 @@ def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
                     "normalizado": texto_normalizado,
                     "metodo": metodo,
                 })
+                if time.time() - t_pag > 5:
+                    logger.warning(
+                        "  Página %d de %s tardó %.1fs",
+                        numero, pdf_path.name, time.time() - t_pag,
+                    )
         finally:
             documento.close()
     except Exception as e:
@@ -409,13 +439,10 @@ def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
 
     caracteres = sum(len(p["normalizado"]) for p in paginas)
     dur = time.time() - t0
-    # >>> Log por PDF solo si tardó mucho o usó OCR (para no inundar)
-    if dur > 3 or paginas_con_ocr:
-        logger.info(
-            "PDF %s: %d páginas, %d chars, %d con OCR, %.1fs",
-            pdf_path.name, len(paginas), caracteres, paginas_con_ocr, dur,
-        )
-
+    logger.info(
+        "PDF %s: %d páginas, %d chars, %d con OCR, %.1fs",
+        pdf_path.name, len(paginas), caracteres, paginas_con_ocr, dur,
+    )
     if caracteres == 0:
         return [], "Sin texto reconocible (ni digital ni OCR)."
     return paginas, None
@@ -758,13 +785,16 @@ def procesar(
             list(datos_fichas.keys()),
             todos_los_pdfs,
             cache=cache,
-            progress_callback=progress_callback,   # >>> propaga el callback
+            progress_callback=progress_callback,
         )
         logger.info("Fase de indexado: %.1fs", time.time() - t)
 
         fichas_sin_pdf = [f for f, pdfs in mapa_ficha_pdf.items() if not pdfs]
         fichas_con_pdf = [f for f, pdfs in mapa_ficha_pdf.items() if pdfs]
-        logger.info("Fichas con PDF: %d, sin PDF: %d", len(fichas_con_pdf), len(fichas_sin_pdf))
+        logger.info(
+            "Fichas con PDF: %d, sin PDF: %d",
+            len(fichas_con_pdf), len(fichas_sin_pdf),
+        )
 
         resultados_globales, observ_globales = {}, {}
         archivos_globales, detalles_globales, evidencias_globales = {}, {}, {}
@@ -797,7 +827,7 @@ def procesar(
                 ficha = futuros[fut]
                 try:
                     r, o, a, d, e = fut.result()
-                except Exception as exc:
+                except Exception:
                     resultados_globales[ficha] = {}
                     observ_globales[ficha] = {}
                     archivos_globales[ficha] = {}
@@ -816,7 +846,8 @@ def procesar(
                     seg = time.time() - t
                     logger.info(
                         "Análisis: %d/%d fichas (%.1fs, %.2f ficha/s)",
-                        completadas, total_fichas, seg, completadas / seg if seg > 0 else 0,
+                        completadas, total_fichas, seg,
+                        completadas / seg if seg > 0 else 0,
                     )
                 _notificar(
                     progress_callback,

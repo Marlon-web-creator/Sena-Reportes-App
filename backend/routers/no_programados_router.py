@@ -5,28 +5,23 @@ Endpoints del módulo "Verificador No Programados". El procesamiento corre
 en un hilo aparte: el POST devuelve de inmediato un id_ejecucion, y el
 frontend consulta /progreso/{id} cada cierto tiempo.
 
-CAMBIO: este módulo YA NO recibe los PDFs como adjuntos del formulario.
-En su lugar, toma todos los PDFs que haya en la sección "Base de Datos"
-etiquetados con el módulo "no_programados" (el campo `modulo` que ya se
-asigna ahí al subir archivos): debe haber al menos un PDF con ese
-módulo. El Consolidado General SÍ se sigue subiendo como adjunto en
-cada ejecución (form-data, campo "excel"), porque cambia con cada
-verificación.
+Los PDFs NO se suben por formulario: se toman de la sección "Base de
+Datos" filtrando por modulo = "no_programados". El Consolidado General
+SÍ se sube como adjunto en cada ejecución (campo "excel").
 
-Entrada/intermedios (excel + PDFs) en carpeta temporal: el excel llega
-por upload y los PDFs se descargan desde Supabase Storage. Como el
-procesamiento sigue corriendo en segundo plano después de responder el
-POST, la carpeta temporal se borra DENTRO del hilo (en su finally), no
-en el endpoint. El archivo de RESULTADO se sube a Supabase Storage
-antes de marcar la ejecución como terminada.
+La descarga de PDFs desde Supabase Storage se hace en paralelo con
+timeout por archivo, para que un PDF colgado no bloquee todo.
 """
 
 import logging
+import os
 import shutil
 import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -60,6 +55,10 @@ router = APIRouter(prefix="/api/no-programados", tags=["No Programados"])
 
 NOMBRE_MODULO = "no_programados"
 
+# >>> Descarga paralela y timeout por archivo
+MAX_DESCARGAS_PARALELAS = int(os.environ.get("NP_DESCARGAS_PARALELAS") or 8)
+TIMEOUT_DESCARGA_POR_ARCHIVO = float(os.environ.get("NP_TIMEOUT_DESCARGA") or 45)
+
 
 def _ruta_segura(base: Path, nombre_relativo: str) -> Path:
     """Evita path traversal: normaliza y rechaza rutas que se salgan de `base`."""
@@ -76,12 +75,6 @@ def _ruta_local_para_archivo(carpeta_bd: Path, archivo: dict) -> Path:
     Reconstruye, dentro de la carpeta temporal, la misma ruta de
     subcarpetas que el archivo tiene en la sección "Base de Datos"
     (carpeta_id -> nombre).
-
-    Esto es importante porque no_programados.construir_mapa_ficha_pdf()
-    empareja cada PDF con su ficha mirando los NOMBRES DE CARPETA en la
-    ruta (ej. BD/2904878/archivo.pdf). Si los PDFs están organizados en
-    subcarpetas por ficha dentro de "Base de Datos", esa organización se
-    respeta igual que antes, cuando se subía la carpeta completa.
     """
     ruta_carpetas = obtener_ruta_carpeta(archivo["carpeta_id"])
     subcarpetas = [c["nombre"] for c in ruta_carpetas]
@@ -106,8 +99,8 @@ def _subir_generado(ruta_local, id_ejecucion: str) -> str:
 async def iniciar_procesamiento(excel: UploadFile = File(...)):
     """
     El Excel (Consolidado General) se sube como adjunto en cada
-    ejecución. Los PDFs ya no se suben: se toman directamente de la
-    sección "Base de Datos", filtrando por modulo = "no_programados".
+    ejecución. Los PDFs se toman de la sección "Base de Datos" con
+    modulo = "no_programados".
     """
     t_endpoint = time.time()
     logger.info("POST /api/no-programados — excel=%s", excel.filename)
@@ -156,44 +149,76 @@ async def iniciar_procesamiento(excel: UploadFile = File(...)):
         logger.info("Excel guardado en disco: %s (%.1fs)", ruta_excel, time.time() - t)
 
         # ------------------------------------------------------------
-        # Descarga de PDFs desde Supabase Storage.
-        # Nota: con 600+ PDFs esto puede tardar. Loggeamos cada 20.
+        # Descarga de PDFs desde Supabase Storage (en paralelo).
+        # Timeout por archivo: un PDF colgado no bloquea toda la
+        # ejecución, se marca como fallido y se sigue.
         # ------------------------------------------------------------
         logger.info(
-            "Ejecución %s: descargando %d PDF(s) desde Storage…",
+            "Ejecución %s: descargando %d PDF(s) desde Storage (paralelo=%d, timeout=%.0fs)…",
             id_ejecucion, len(archivos_pdf),
+            MAX_DESCARGAS_PARALELAS, TIMEOUT_DESCARGA_POR_ARCHIVO,
         )
         t_descarga = time.time()
         pdfs_guardados = 0
         pdfs_fallidos = []
-        for i, pdf in enumerate(archivos_pdf, start=1):
+
+        def _descargar_uno(pdf: dict):
+            """Devuelve (nombre, ok: bool, error: str|None)."""
+            nombre = pdf.get("nombre_original", "?")
             try:
                 destino = _ruta_local_para_archivo(carpeta_bd, pdf)
-            except ValueError:
-                logger.warning("Ruta inválida, se omite: %s", pdf.get("nombre_original"))
-                pdfs_fallidos.append(pdf["nombre_original"])
-                continue
+            except ValueError as e:
+                return nombre, False, f"ruta inválida: {e}"
             destino.parent.mkdir(parents=True, exist_ok=True)
             try:
-                destino.write_bytes(supabase_storage.descargar_bytes(pdf["ruta"]))
-            except Exception:
-                # Si un PDF puntual falla al descargar de Storage, se
-                # omite y se sigue con los demás en vez de tumbar todo
-                # el proceso.
-                logger.exception(
-                    "Fallo descargando PDF %s (%s)",
-                    pdf.get("nombre_original"), pdf.get("ruta"),
-                )
-                pdfs_fallidos.append(pdf["nombre_original"])
-                continue
-            pdfs_guardados += 1
-            if i % 20 == 0 or i == len(archivos_pdf):
-                seg = time.time() - t_descarga
-                v = i / seg if seg > 0 else 0
-                logger.info(
-                    "Descarga Storage: %d/%d PDFs (%.1fs, %.1f PDF/s, %d fallidos)",
-                    i, len(archivos_pdf), seg, v, len(pdfs_fallidos),
-                )
+                datos = supabase_storage.descargar_bytes(pdf["ruta"])
+                destino.write_bytes(datos)
+                return nombre, True, None
+            except Exception as e:
+                return nombre, False, f"{type(e).__name__}: {e}"
+
+        with ThreadPoolExecutor(
+            max_workers=MAX_DESCARGAS_PARALELAS, thread_name_prefix="np-dl"
+        ) as pool:
+            futuros = {
+                pool.submit(_descargar_uno, pdf): pdf["nombre_original"]
+                for pdf in archivos_pdf
+            }
+            total = len(futuros)
+            procesados = 0
+
+            for fut in as_completed(futuros):
+                nombre = futuros[fut]
+                try:
+                    nombre, ok, err = fut.result(timeout=TIMEOUT_DESCARGA_POR_ARCHIVO)
+                except FuturesTimeout:
+                    logger.warning(
+                        "Timeout descargando %s (> %.0fs), se omite",
+                        nombre, TIMEOUT_DESCARGA_POR_ARCHIVO,
+                    )
+                    pdfs_fallidos.append(nombre)
+                    procesados += 1
+                    continue
+                except Exception:
+                    logger.exception("Error inesperado descargando %s", nombre)
+                    pdfs_fallidos.append(nombre)
+                    procesados += 1
+                    continue
+
+                if ok:
+                    pdfs_guardados += 1
+                else:
+                    logger.warning("Fallo descargando %s: %s", nombre, err)
+                    pdfs_fallidos.append(nombre)
+
+                procesados += 1
+                if procesados % 20 == 0 or procesados == total:
+                    seg = time.time() - t_descarga
+                    v = procesados / seg if seg > 0 else 0
+                    logger.info(
+                        "Descarga Storage: %d/%d PDFs (%.1fs, %.1f PDF/s, %d ok, %d fallidos)",
+                        procesados, total, seg, v, pdfs_guardados, len(pdfs_fallidos),
+                    )
 
         if pdfs_guardados == 0:
             raise HTTPException(
@@ -206,15 +231,16 @@ async def iniciar_procesamiento(excel: UploadFile = File(...)):
             pdfs_guardados, len(pdfs_fallidos), time.time() - t_descarga,
         )
     except HTTPException:
-        # El hilo nunca arranca, así que la limpieza es responsabilidad
-        # de este endpoint.
-        logger.warning("Cancelando ejecución %s (HTTPException). Limpiando temporal.", id_ejecucion)
+        logger.warning(
+            "Cancelando ejecución %s (HTTPException). Limpiando temporal.",
+            id_ejecucion,
+        )
         shutil.rmtree(carpeta_temporal, ignore_errors=True)
         raise
     except Exception:
-        # Cualquier otro error (ej. lectura del excel, IO en disco) tampoco
-        # debe dejar la carpeta temporal huérfana.
-        logger.exception("Error preparando ejecución %s. Limpiando temporal.", id_ejecucion)
+        logger.exception(
+            "Error preparando ejecución %s. Limpiando temporal.", id_ejecucion,
+        )
         shutil.rmtree(carpeta_temporal, ignore_errors=True)
         raise
 
@@ -241,8 +267,6 @@ async def iniciar_procesamiento(excel: UploadFile = File(...)):
                     id_ejecucion, time.time() - t_hilo,
                 )
 
-                # Subir el resultado a Supabase Storage ANTES de guardar
-                # en BD y de avisar al frontend que ya terminó.
                 ruta_storage = _subir_generado(resultado["archivo_generado"], id_ejecucion)
                 resultado["archivo_generado"] = ruta_storage
                 resultado["pdfs_fallidos_al_descargar"] = pdfs_fallidos
@@ -266,8 +290,6 @@ async def iniciar_procesamiento(excel: UploadFile = File(...)):
                 logger.exception("Hilo %s: error en procesar(): %s", id_ejecucion, e)
                 progreso.finalizar_error(id_ejecucion, str(e))
         finally:
-            # Aquí sí se puede borrar: el hilo ya terminó de usar la
-            # carpeta temporal (subió lo que necesitaba a Storage).
             logger.info("Hilo %s: limpiando carpeta temporal", id_ejecucion)
             shutil.rmtree(carpeta_temporal, ignore_errors=True)
 
