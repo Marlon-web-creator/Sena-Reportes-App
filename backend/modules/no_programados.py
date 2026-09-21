@@ -4,19 +4,22 @@ modules/no_programados.py
 Lógica de NoProgramados.py adaptada para la API web.
 
 Novedades de esta versión:
-- Carga de PDFs en PARALELO mediante un pool de hilos (PDFCache).
-- Análisis de FICHAS en PARALELO (ThreadPoolExecutor).
-- OCR concurrente limitado por semáforo (Tesseract ya es multi-core).
-- Caché compartida y thread-safe: cada PDF se lee UNA sola vez, aunque
-  lo usen varias fichas.
-- Igual que antes: detección texto vs. OCR página por página, y
-  emparejamiento PDF -> ficha por CONTENIDO (no por nombre de archivo).
+- Logs detallados en cada fase (indexado de PDFs, mapa ficha->PDF, análisis).
+- Caché LRU acotada: evita OOM en contenedores pequeños con 600+ PDFs.
+- Precarga con callback de progreso: el frontend ya no se queda "colgado"
+  durante la fase de lectura de PDFs.
+- OCR opcional por env var (NP_SKIP_OCR=1) y DPI configurable.
+- Fase de indexado separada de la fase de análisis: se libera la RAM de
+  los PDFs antes de empezar el análisis de fichas.
 """
 
+import logging
 import os
 import re
 import threading
+import time
 import unicodedata
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from copy import copy
 from difflib import SequenceMatcher
@@ -25,6 +28,18 @@ from typing import Callable, Optional
 
 import fitz  # PyMuPDF
 import openpyxl
+
+# >>> LOGGING (una sola vez; idempotente si el módulo se recarga)
+logger = logging.getLogger("no_programados")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] no_programados: %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    logger.addHandler(_h)
+    logger.propagate = False
 
 # ============================================================
 # CONFIGURACIÓN
@@ -42,7 +57,8 @@ COL_EVIDENCIA = 15
 COL_DOCUMENTO = 4
 
 IDIOMA_OCR = "spa"
-DPI_OCR = 200
+# >>> DPI configurable para reducir tiempo de OCR si hace falta
+DPI_OCR = int(os.environ.get("NP_OCR_DPI") or 200)
 MIN_CARACTERES_TEXTO_PAGINA = 20
 
 UMBRAL_SIMILITUD_VENTANA = 0.82
@@ -69,31 +85,41 @@ ProgressCallback = Optional[Callable[[str, int, int], None]]
 # ------------------------------------------------------------
 _CPU = os.cpu_count() or 4
 
-# Hilos para cargar PDFs (I/O + OCR). Más hilos que cores porque hay I/O.
 NUM_WORKERS_PDF = int(os.environ.get("NP_WORKERS_PDF") or min(8, _CPU * 2))
-# Hilos para analizar fichas en paralelo (una ficha por hilo).
 NUM_WORKERS_FICHAS = int(os.environ.get("NP_WORKERS_FICHAS") or max(2, min(4, _CPU)))
-# Límite de OCR simultáneo: Tesseract ya usa varios cores por invocación.
 MAX_OCR_CONCURRENTES = int(os.environ.get("NP_MAX_OCR") or 2)
+# >>> Tamaño máximo de la caché LRU (en PDFs). 0 = ilimitado (¡peligro OOM!).
+PDF_CACHE_MAX_SIZE = int(os.environ.get("NP_CACHE_MAX") or 60)
+# >>> Permite desactivar OCR por completo si los PDFs ya son digitales.
+SKIP_OCR = os.environ.get("NP_SKIP_OCR", "").lower() in ("1", "true", "yes")
 
 _OCR_SEMAPHORE = threading.Semaphore(MAX_OCR_CONCURRENTES)
 
 try:
+    if SKIP_OCR:
+        raise RuntimeError("OCR deshabilitado por NP_SKIP_OCR")
     import pytesseract
     from PIL import Image
     pytesseract.get_tesseract_version()
     OCR_DISPONIBLE = True
-except Exception:
+except Exception as _e:
     OCR_DISPONIBLE = False
+    logger.warning("OCR no disponible: %s", _e)
+
+logger.info(
+    "Config: workers_pdf=%d workers_fichas=%d max_ocr=%d cache_max=%s ocr=%s dpi=%d",
+    NUM_WORKERS_PDF, NUM_WORKERS_FICHAS, MAX_OCR_CONCURRENTES,
+    PDF_CACHE_MAX_SIZE or "ilimitado", OCR_DISPONIBLE, DPI_OCR,
+)
 
 
 def _notificar(callback: ProgressCallback, mensaje: str, actual: int = 0, total: int = 0):
+    logger.info("[progreso] %s (%d/%d)", mensaje, actual, total)
     if callback:
         try:
             callback(mensaje, actual, total)
         except Exception:
-            # Un callback roto no debe tumbar el proceso.
-            pass
+            logger.exception("callback de progreso falló")
 
 
 # ============================================================
@@ -157,23 +183,23 @@ def fila_es_valida(ws, fila):
 
 
 # ============================================================
-# CACHÉ DE PDFs — thread-safe y con carga paralela
+# CACHÉ DE PDFs — LRU + progreso
 # ============================================================
 
 class PDFCache:
     """
-    Caché de PDFs cargados (texto + OCR), seguro para usar desde varios hilos.
+    Caché LRU de PDFs cargados (texto + OCR). Thread-safe.
 
-    - `get(pdf)` devuelve el resultado ya cacheado o lanza la carga.
-    - Si dos hilos piden el MISMO pdf a la vez, solo se carga una vez:
-      el segundo hilo espera al Future del primero.
-    - `preload(pdfs)` dispara la carga de N PDFs en paralelo y espera.
+    >>> CAMBIO CLAVE: `max_size` acota cuántos PDFs se mantienen en RAM.
+    Antes, con 600+ PDFs, la caché crecía sin límite y reventaba la
+    memoria del contenedor. Ahora se evictan los menos usados.
     """
 
-    def __init__(self, max_workers: int = NUM_WORKERS_PDF):
-        self._cache: dict[Path, tuple[list[dict], Optional[str]]] = {}
+    def __init__(self, max_workers: int = NUM_WORKERS_PDF, max_size: int = PDF_CACHE_MAX_SIZE):
+        self._cache: "OrderedDict[Path, tuple[list[dict], Optional[str]]]" = OrderedDict()
         self._futures: dict[Path, Future] = {}
         self._lock = threading.Lock()
+        self._max_size = max_size if max_size and max_size > 0 else None
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="np-pdf"
         )
@@ -181,6 +207,7 @@ class PDFCache:
     def get(self, pdf_path: Path) -> tuple[list[dict], Optional[str]]:
         with self._lock:
             if pdf_path in self._cache:
+                self._cache.move_to_end(pdf_path)
                 return self._cache[pdf_path]
             fut = self._futures.get(pdf_path)
             if fut is None:
@@ -190,10 +217,21 @@ class PDFCache:
         resultado = fut.result()
         with self._lock:
             self._cache[pdf_path] = resultado
+            self._cache.move_to_end(pdf_path)
+            self._evictar_locked()
         return resultado
 
-    def preload(self, pdf_paths) -> None:
-        """Dispara la carga de varios PDFs en paralelo y espera a que terminen."""
+    def _evictar_locked(self):
+        if not self._max_size:
+            return
+        while len(self._cache) > self._max_size:
+            self._cache.popitem(last=False)
+
+    def preload(self, pdf_paths, progress_callback: ProgressCallback = None) -> None:
+        """
+        Dispara la carga de varios PDFs en paralelo y espera.
+        >>> Ahora reporta progreso cada N PDFs, para que no parezca colgado.
+        """
         pendientes = []
         with self._lock:
             for p in pdf_paths:
@@ -205,16 +243,52 @@ class PDFCache:
                     self._futures[p] = fut
                 pendientes.append((p, fut))
 
-        for p, fut in pendientes:
+        total = len(pendientes)
+        if total == 0:
+            logger.info("Preload: todo ya estaba en caché (%d PDFs)", len(pdf_paths))
+            return
+
+        logger.info("Preload: %d PDFs pendientes de cargar", total)
+        fut_a_path = {fut: p for p, fut in pendientes}
+        completadas = 0
+        errores = 0
+        inicio = time.time()
+
+        for fut in as_completed(fut_a_path.keys()):
+            p = fut_a_path[fut]
             try:
                 resultado = fut.result()
+                if not resultado[0]:
+                    errores += 1
+                    logger.warning("PDF sin contenido: %s (%s)", p.name, resultado[1])
             except Exception as e:
                 resultado = ([], f"Error cargando PDF: {e}")
+                errores += 1
+                logger.exception("Error cargando %s", p)
             with self._lock:
                 self._cache[p] = resultado
+                self._cache.move_to_end(p)
+                self._evictar_locked()
+
+            completadas += 1
+            # >>> Log cada 10 PDFs (antes: silencio total durante minutos)
+            if completadas % 10 == 0 or completadas == total:
+                seg = time.time() - inicio
+                v = completadas / seg if seg > 0 else 0
+                logger.info(
+                    "Preload: %d/%d PDFs (%.1fs, %.1f PDF/s, %d errores)",
+                    completadas, total, seg, v, errores,
+                )
+                _notificar(
+                    progress_callback,
+                    f"Leyendo PDFs: {completadas}/{total}…",
+                    completadas, total,
+                )
+
+        logger.info("Preload: completo en %.1fs", time.time() - inicio)
 
     def shutdown(self):
-        self._executor.shutdown(wait=False, cancel_futures=False)
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
 
 # ============================================================
@@ -232,13 +306,13 @@ def construir_mapa_ficha_pdf(
     fichas,
     todos_los_pdfs,
     cache: PDFCache,
+    progress_callback: ProgressCallback = None,
 ):
     """
     Asocia cada PDF a TODAS las fichas cuyo número aparezca DENTRO del
-    contenido del PDF (independiente del nombre del archivo y carpetas).
+    contenido del PDF.
 
-    Los PDFs se precargan en paralelo; luego la búsqueda del número de
-    ficha es O(números encontrados) por PDF.
+    >>> CAMBIO: el callback de progreso se propaga a `cache.preload()`.
     """
     fichas_digitos: dict[str, str] = {}
     for f in fichas:
@@ -248,14 +322,14 @@ def construir_mapa_ficha_pdf(
 
     patron_numero = re.compile(rf"(?<!\d)(\d{{{MIN_DIGITOS_FICHA},}})(?!\d)")
 
-    # Precarga paralela: al terminar esta línea todos los PDFs están
-    # leídos y cacheados (o marcados con error).
-    cache.preload(todos_los_pdfs)
+    # >>> Aquí es donde antes se quedaba "colgado" sin decir nada.
+    cache.preload(todos_los_pdfs, progress_callback=progress_callback)
 
     mapa = {f: [] for f in fichas}
     pdfs_omitidos: list[Path] = []
 
-    for pdf in todos_los_pdfs:
+    inicio = time.time()
+    for i, pdf in enumerate(todos_los_pdfs, start=1):
         paginas, _ = cache.get(pdf)
         if not paginas:
             pdfs_omitidos.append(pdf)
@@ -274,6 +348,11 @@ def construir_mapa_ficha_pdf(
         for ficha in fichas_encontradas:
             mapa[ficha].append(pdf)
 
+    logger.info(
+        "Mapa ficha->PDF: %d fichas, %d PDFs indexados, %d omitidos (%.1fs)",
+        sum(1 for v in mapa.values() if v), len(todos_los_pdfs),
+        len(pdfs_omitidos), time.time() - inicio,
+    )
     return mapa, pdfs_omitidos
 
 
@@ -284,8 +363,6 @@ def construir_mapa_ficha_pdf(
 def _ocr_pagina(pagina) -> str:
     if not OCR_DISPONIBLE:
         return ""
-    # Tesseract ya usa varios hilos internos: limitamos cuántas
-    # invocaciones simultáneas hacemos para no saturar la CPU.
     with _OCR_SEMAPHORE:
         matriz = fitz.Matrix(DPI_OCR / 72, DPI_OCR / 72)
         pix = pagina.get_pixmap(matrix=matriz, alpha=False)
@@ -296,10 +373,11 @@ def _ocr_pagina(pagina) -> str:
 def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
     """
     Devuelve la lista de páginas del PDF, decidiendo página por página si
-    hace falta OCR. Cada hilo abre SU PROPIO documento (PyMuPDF no permite
-    compartir Document entre hilos, pero sí abrir documentos distintos).
+    hace falta OCR.
     """
+    t0 = time.time()
     paginas = []
+    paginas_con_ocr = 0
     try:
         documento = fitz.open(str(pdf_path))
         try:
@@ -315,6 +393,7 @@ def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
                         texto_original = texto_ocr
                         texto_normalizado = texto_ocr_normalizado
                         metodo = "OCR"
+                        paginas_con_ocr += 1
 
                 paginas.append({
                     "pagina": numero,
@@ -325,9 +404,18 @@ def cargar_pdf(pdf_path: Path) -> tuple[list[dict], Optional[str]]:
         finally:
             documento.close()
     except Exception as e:
+        logger.exception("Error abriendo %s", pdf_path.name)
         return [], f"Error abriendo PDF: {e}"
 
     caracteres = sum(len(p["normalizado"]) for p in paginas)
+    dur = time.time() - t0
+    # >>> Log por PDF solo si tardó mucho o usó OCR (para no inundar)
+    if dur > 3 or paginas_con_ocr:
+        logger.info(
+            "PDF %s: %d páginas, %d chars, %d con OCR, %.1fs",
+            pdf_path.name, len(paginas), caracteres, paginas_con_ocr, dur,
+        )
+
     if caracteres == 0:
         return [], "Sin texto reconocible (ni digital ni OCR)."
     return paginas, None
@@ -618,14 +706,25 @@ def procesar(
     salida_dir: Path,
     progress_callback: ProgressCallback = None,
 ) -> dict:
+    t_inicio = time.time()
+    logger.info("=== INICIO procesar() ===")
+    logger.info("Excel: %s", archivo_excel)
+    logger.info("Carpeta BD: %s", carpeta_bd)
+    logger.info("Salida: %s", salida_dir)
+
     if not archivo_excel.exists():
         raise FileNotFoundError(f"No se encontró el Excel: {archivo_excel}")
 
     salida_dir.mkdir(parents=True, exist_ok=True)
 
     _notificar(progress_callback, "Abriendo Excel y listando PDFs…", 0, 1)
+
+    t = time.time()
     wb = openpyxl.load_workbook(archivo_excel)
+    logger.info("Excel abierto en %.1fs (%d hojas)", time.time() - t, len(wb.worksheets))
+
     todos_los_pdfs = obtener_todos_los_pdfs(carpeta_bd)
+    logger.info("PDFs encontrados: %d", len(todos_los_pdfs))
     if not todos_los_pdfs:
         raise FileNotFoundError(f"No hay PDFs en: {carpeta_bd}")
 
@@ -643,6 +742,7 @@ def procesar(
         datos_fichas[ficha] = filas_validas
 
     total_fichas = len(datos_fichas)
+    logger.info("Fichas (hojas) con filas válidas: %d", total_fichas)
 
     _notificar(
         progress_callback,
@@ -650,30 +750,33 @@ def procesar(
         0, 1,
     )
 
-    cache = PDFCache(max_workers=NUM_WORKERS_PDF)
+    cache = PDFCache(max_workers=NUM_WORKERS_PDF, max_size=PDF_CACHE_MAX_SIZE)
     try:
-        # 1) Pre-carga paralela + construcción del mapa ficha -> PDF.
+        # 1) Indexado (mapa ficha -> PDFs). Reporta progreso internamente.
+        t = time.time()
         mapa_ficha_pdf, pdfs_omitidos = construir_mapa_ficha_pdf(
             list(datos_fichas.keys()),
             todos_los_pdfs,
             cache=cache,
+            progress_callback=progress_callback,   # >>> propaga el callback
         )
+        logger.info("Fase de indexado: %.1fs", time.time() - t)
 
         fichas_sin_pdf = [f for f, pdfs in mapa_ficha_pdf.items() if not pdfs]
         fichas_con_pdf = [f for f, pdfs in mapa_ficha_pdf.items() if pdfs]
+        logger.info("Fichas con PDF: %d, sin PDF: %d", len(fichas_con_pdf), len(fichas_sin_pdf))
 
         resultados_globales, observ_globales = {}, {}
         archivos_globales, detalles_globales, evidencias_globales = {}, {}, {}
 
-        # 2) Análisis de fichas en paralelo. Cada worker usa el cache
-        #    ya caliente, así que la lectura de PDFs no se repite.
+        # 2) Análisis de fichas.
         _notificar(
             progress_callback,
-            f"Analizando {total_fichas} fichas en paralelo "
-            f"({NUM_WORKERS_FICHAS} hilos)…",
+            f"Analizando {total_fichas} fichas…",
             0, total_fichas,
         )
 
+        t = time.time()
         completadas = 0
         with ThreadPoolExecutor(
             max_workers=NUM_WORKERS_FICHAS, thread_name_prefix="np-ficha"
@@ -695,13 +798,12 @@ def procesar(
                 try:
                     r, o, a, d, e = fut.result()
                 except Exception as exc:
-                    # Una ficha que falle no debe tumbar el resto.
                     resultados_globales[ficha] = {}
                     observ_globales[ficha] = {}
                     archivos_globales[ficha] = {}
                     detalles_globales[ficha] = {}
                     evidencias_globales[ficha] = {}
-                    print(f"[no_programados] Error en ficha {ficha}: {exc}")
+                    logger.exception("Error en ficha %s", ficha)
                 else:
                     resultados_globales[ficha] = r
                     observ_globales[ficha] = o
@@ -710,11 +812,19 @@ def procesar(
                     evidencias_globales[ficha] = e
 
                 completadas += 1
+                if completadas % 5 == 0 or completadas == total_fichas:
+                    seg = time.time() - t
+                    logger.info(
+                        "Análisis: %d/%d fichas (%.1fs, %.2f ficha/s)",
+                        completadas, total_fichas, seg, completadas / seg if seg > 0 else 0,
+                    )
                 _notificar(
                     progress_callback,
                     f"Ficha {ficha} analizada ({completadas}/{total_fichas})…",
                     completadas, total_fichas,
                 )
+
+        logger.info("Fase de análisis: %.1fs", time.time() - t)
 
         total_programado = 0
         total_no_programado = 0
@@ -750,6 +860,10 @@ def procesar(
     ruta_salida = salida_dir / "Consolidado_Procesado.xlsx"
     wb.save(ruta_salida)
 
+    logger.info(
+        "=== FIN procesar() en %.1fs | %d programado, %d no programado ===",
+        time.time() - t_inicio, total_programado, total_no_programado,
+    )
     _notificar(progress_callback, "Listo.", total_fichas, total_fichas)
 
     def _rel(p: Path) -> str:
