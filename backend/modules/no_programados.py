@@ -10,6 +10,16 @@ Optimizaciones aplicadas en esta versión:
 - Indexado por nombre de archivo antes que por contenido.
 - Caché en disco del texto extraído de cada PDF (gzip JSON en /tmp).
 - Caché en disco del mapa ficha->PDF (por hash del inventario).
+
+Fixes anti-bucle aplicados:
+- La caché registra si el OCR fue *intentado*, no si tuvo éxito.
+  Un PDF escaneado que agota el timeout se marca como "ya intentado"
+  y no se reintenta en cada ficha / análisis posterior.
+- La caché en disco se escribe SIEMPRE, también cuando hay error, para
+  que un PDF problemático no se vuelva a procesar en la siguiente
+  ejecución del mismo contenedor.
+- La clave de la caché en memoria es (Path, permitir_ocr); una versión
+  "con OCR" puede servir a un caller que pide "sin OCR".
 """
 
 import gzip
@@ -247,20 +257,20 @@ def _escribir_cache_texto(cache_file: Path, data: dict):
 
 class PDFCache:
     """
-    Caché LRU de PDFs cargados (texto + OCR). Thread-safe.
+    Caché LRU de PDFs cargados. Thread-safe.
 
-    - La caché en memoria se indexa solo por ruta. El resultado guarda
-      si se aplicó OCR.
-    - Si se pide `permitir_ocr=True` y la entrada existente NO tenía OCR,
-      se recarga (aprovechando la caché en disco si la hay).
-    - Los Futures se liberan tan pronto como el resultado se mueve a caché.
-    - `max_size` acota cuántos PDFs se mantienen en RAM (LRU).
+    - La clave es (Path, permitir_ocr). Así una versión "sin OCR" y otra
+      "con OCR" del mismo PDF conviven sin pisarse ni relanzarse.
+    - Si solo tenemos la versión "con OCR" y piden "sin OCR", se sirve
+      igual (es superset).
+    - Los Futures se liberan tan pronto como el resultado pasa a caché.
+    - `max_size` acota cuántas entradas (path, permitir_ocr) caben en RAM.
     """
 
     def __init__(self, max_workers: int = NUM_WORKERS_PDF,
                  max_size: int = PDF_CACHE_MAX_SIZE):
-        # entry = {"paginas": [...], "error": str|None, "ocr_aplicado": bool}
-        self._cache: "OrderedDict[Path, dict]" = OrderedDict()
+        # clave: tuple[Path, bool] → {"paginas": [...], "error": str|None}
+        self._cache: "OrderedDict[tuple, dict]" = OrderedDict()
         self._futures: dict[tuple, Future] = {}
         self._lock = threading.Lock()
         self._max_size = max_size if max_size and max_size > 0 else None
@@ -269,36 +279,35 @@ class PDFCache:
         )
 
     def get(self, pdf_path: Path, permitir_ocr: bool = True):
+        clave = (pdf_path, permitir_ocr)
         with self._lock:
-            entry = self._cache.get(pdf_path)
-            if entry is not None and (entry["ocr_aplicado"] or not permitir_ocr):
-                self._cache.move_to_end(pdf_path)
+            entry = self._cache.get(clave)
+            if entry is not None:
+                self._cache.move_to_end(clave)
                 return entry["paginas"], entry["error"]
 
-            clave = (pdf_path, permitir_ocr)
+            # Si piden "sin OCR" pero solo tenemos "con OCR", la servimos.
+            if not permitir_ocr:
+                alt = self._cache.get((pdf_path, True))
+                if alt is not None:
+                    self._cache.move_to_end((pdf_path, True))
+                    return alt["paginas"], alt["error"]
+
             fut = self._futures.get(clave)
             if fut is None:
                 fut = self._executor.submit(cargar_pdf, pdf_path, permitir_ocr)
                 self._futures[clave] = fut
 
         # Esperar fuera del lock.
-        paginas, error, ocr_aplicado = fut.result()
+        paginas, error, _ = fut.result()
 
         with self._lock:
             if self._futures.get(clave) is fut:
                 del self._futures[clave]
-            prev = self._cache.get(pdf_path)
-            # Solo reemplazamos si no había entrada, o si la nueva trae OCR
-            # (la versión con OCR es siempre preferible a la de solo-texto).
-            if prev is None or (ocr_aplicado and not prev.get("ocr_aplicado")):
-                self._cache[pdf_path] = {
-                    "paginas": paginas,
-                    "error": error,
-                    "ocr_aplicado": ocr_aplicado,
-                }
-                self._cache.move_to_end(pdf_path)
-                self._evictar_locked()
-            return self._cache[pdf_path]["paginas"], self._cache[pdf_path]["error"]
+            self._cache[clave] = {"paginas": paginas, "error": error}
+            self._cache.move_to_end(clave)
+            self._evictar_locked()
+            return self._cache[clave]["paginas"], self._cache[clave]["error"]
 
     def _evictar_locked(self):
         if not self._max_size:
@@ -316,10 +325,12 @@ class PDFCache:
         pendientes = []
         with self._lock:
             for p in pdf_paths:
-                entry = self._cache.get(p)
-                if entry is not None and (entry["ocr_aplicado"] or not permitir_ocr):
-                    continue
                 clave = (p, permitir_ocr)
+                if clave in self._cache:
+                    continue
+                # Si piden "sin OCR" y ya tenemos "con OCR", no hace falta.
+                if not permitir_ocr and (p, True) in self._cache:
+                    continue
                 fut = self._futures.get(clave)
                 if fut is None:
                     fut = self._executor.submit(cargar_pdf, p, permitir_ocr)
@@ -331,7 +342,8 @@ class PDFCache:
             logger.info("Preload: todo ya estaba en caché (%d PDFs)", len(pdf_paths))
             return
 
-        logger.info("Preload: %d PDFs pendientes de cargar (ocr=%s)", total, permitir_ocr)
+        logger.info("Preload: %d PDFs pendientes de cargar (ocr=%s)",
+                    total, permitir_ocr)
         fut_a_info = {fut: (p, clave) for p, clave, fut in pendientes}
         completadas = 0
         errores = 0
@@ -341,7 +353,7 @@ class PDFCache:
             p, clave = fut_a_info[fut]
             try:
                 resultado = fut.result(timeout=TIMEOUT_PDF_PRELOAD)
-                paginas, error, ocr_aplicado = resultado
+                paginas, error, _ = resultado
                 if not paginas:
                     errores += 1
                     logger.warning("PDF sin contenido: %s (%s)", p.name, error)
@@ -357,19 +369,13 @@ class PDFCache:
                 errores += 1
                 logger.exception("Error cargando %s", p)
 
-            paginas, error, ocr_aplicado = resultado
+            paginas, error, _ = resultado
             with self._lock:
                 if self._futures.get(clave) is fut:
                     del self._futures[clave]
-                prev = self._cache.get(p)
-                if prev is None or (ocr_aplicado and not prev.get("ocr_aplicado")):
-                    self._cache[p] = {
-                        "paginas": paginas,
-                        "error": error,
-                        "ocr_aplicado": ocr_aplicado,
-                    }
-                    self._cache.move_to_end(p)
-                    self._evictar_locked()
+                self._cache[clave] = {"paginas": paginas, "error": error}
+                self._cache.move_to_end(clave)
+                self._evictar_locked()
 
             completadas += 1
             if completadas % 10 == 0 or completadas == total:
@@ -413,12 +419,17 @@ def _ocr_pagina(pagina) -> str:
 
 def _extraer_pdf(pdf_path: Path, permitir_ocr: bool):
     """
-    Extrae texto (y OCR si procede) del PDF.
-    Devuelve (paginas, error, ocr_aplicado).
+    Devuelve (paginas, error, ocr_intentado):
+      - ocr_intentado=True  → se ejecutó OCR al menos una vez (haya o no
+        producido texto). Evita reintentos infinitos sobre PDFs que
+        nunca van a dar texto (escaneados, protegidos, corruptos…).
+      - ocr_intentado=False → no se intentó OCR, así que una segunda
+        llamada con permitir_ocr=True SÍ debe volver a procesarlo.
     """
     t0 = time.time()
     paginas = []
     paginas_con_ocr = 0
+    ocr_intentado = False
     try:
         documento = fitz.open(str(pdf_path))
     except Exception as e:
@@ -434,6 +445,7 @@ def _extraer_pdf(pdf_path: Path, permitir_ocr: bool):
 
             if (permitir_ocr and OCR_DISPONIBLE
                     and len(texto_normalizado) < MIN_CARACTERES_TEXTO_PAGINA):
+                ocr_intentado = True          # ← aunque falle, ya no reintentamos
                 texto_ocr = _ocr_pagina(pagina)
                 texto_ocr_normalizado = normalizar_texto(texto_ocr)
                 if len(texto_ocr_normalizado) > len(texto_normalizado):
@@ -459,39 +471,48 @@ def _extraer_pdf(pdf_path: Path, permitir_ocr: bool):
     caracteres = sum(len(p["normalizado"]) for p in paginas)
     dur = time.time() - t0
     logger.info(
-        "PDF %s: %d páginas, %d chars, %d con OCR, %.1fs",
-        pdf_path.name, len(paginas), caracteres, paginas_con_ocr, dur,
+        "PDF %s: %d páginas, %d chars, %d con OCR (intentado=%s), %.1fs",
+        pdf_path.name, len(paginas), caracteres, paginas_con_ocr,
+        ocr_intentado, dur,
     )
     if caracteres == 0:
-        return [], "Sin texto reconocible (ni digital ni OCR).", False
-    return paginas, None, (paginas_con_ocr > 0)
+        return [], "Sin texto reconocible (ni digital ni OCR).", ocr_intentado
+    return paginas, None, ocr_intentado
 
 
 def cargar_pdf(pdf_path: Path, permitir_ocr: bool = True):
     """
     Punto de entrada con caché en disco.
-    Devuelve (paginas, error, ocr_aplicado).
+    Devuelve (paginas, error, ocr_intentado).
     """
     cache_file = _cache_file_pdf(pdf_path)
     if cache_file is not None and cache_file.exists():
         data = _leer_cache_texto(cache_file)
         if data is not None:
-            cached_ocr = bool(data.get("ocr_aplicado", True))
-            # Reutilizamos si la caché trae OCR o si el caller no pide OCR.
-            if cached_ocr or not permitir_ocr:
-                logger.info("PDF %s: desde caché en disco (ocr=%s)",
-                            pdf_path.name, cached_ocr)
-                return data["paginas"], data.get("error"), cached_ocr
+            cache_permitio_ocr = bool(data.get("permitir_ocr", True))
+            ocr_intentado = bool(data.get("ocr_intentado", False))
+            # Aceptamos la caché si:
+            #   - se generó con OCR permitido (es superset de sin-OCR), o
+            #   - el caller tampoco pide OCR.
+            if cache_permitio_ocr or not permitir_ocr:
+                logger.info(
+                    "PDF %s: desde caché en disco (permitir_ocr=%s, ocr_intentado=%s)",
+                    pdf_path.name, cache_permitio_ocr, ocr_intentado,
+                )
+                return data["paginas"], data.get("error"), ocr_intentado
 
-    paginas, error, ocr_aplicado = _extraer_pdf(pdf_path, permitir_ocr)
+    paginas, error, ocr_intentado = _extraer_pdf(pdf_path, permitir_ocr)
 
-    if cache_file is not None and error is None:
+    # ⚠️ SIEMPRE escribir la caché, también cuando hay error.
+    # Si no, un PDF problemático se reintenta en bucle en cada ejecución.
+    if cache_file is not None:
         _escribir_cache_texto(cache_file, {
             "paginas": paginas,
             "error": error,
-            "ocr_aplicado": ocr_aplicado,
+            "permitir_ocr": permitir_ocr,
+            "ocr_intentado": ocr_intentado,
         })
-    return paginas, error, ocr_aplicado
+    return paginas, error, ocr_intentado
 
 
 # ============================================================
@@ -1067,10 +1088,15 @@ def procesar(
     ruta_salida = salida_dir / "Consolidado_Procesado.xlsx"
     wb.save(ruta_salida)
 
+    # --- Resumen de tiempos en una sola línea (para verificar en Render) ---
     logger.info(
-        "=== FIN procesar() en %.1fs | %d programado, %d no programado ===",
-        time.time() - t_inicio, total_programado, total_no_programado,
+        "RESUMEN | total=%.1fs | fichas=%d | pdfs=%d | programado=%d | no_programado=%d "
+        "| cache_disco=%s | ocr_indexado=%s",
+        time.time() - t_inicio, total_fichas, len(todos_los_pdfs),
+        total_programado, total_no_programado,
+        bool(CACHE_DISCO_DIR), OCR_EN_INDEXADO,
     )
+
     _notificar(progress_callback, "Listo.", total_fichas, total_fichas)
 
     def _rel(p: Path) -> str:
