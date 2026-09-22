@@ -67,17 +67,20 @@ def _sanear_nombre(nombre: str) -> str:
 def _redirigir_a_url_firmada(ruta_storage: str, nombre_descarga: str | None = None) -> RedirectResponse:
     """
     Genera una URL firmada temporal para el archivo y redirige a ella.
+
+    Nota: ya no pre-validamos con existe_archivo() (que lista la carpeta
+    y puede dar falsos negativos si hay muchos archivos). En vez de eso,
+    intentamos crear la URL firmada directamente: si Supabase confirma
+    que el objeto no existe, crear_url_firmada() devuelve None y ahí sí
+    respondemos 404.
     """
-    if not ruta_storage or not supabase_storage.existe_archivo(ruta_storage):
+    if not ruta_storage:
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
 
     url = supabase_storage.crear_url_firmada(ruta_storage, nombre_descarga=nombre_descarga)
 
     if not url:
-        raise HTTPException(
-            status_code=500,
-            detail="No se pudo generar el enlace de descarga.",
-        )
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
 
     return RedirectResponse(url)
 

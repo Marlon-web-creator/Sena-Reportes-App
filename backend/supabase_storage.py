@@ -224,6 +224,15 @@ def existe_archivo(ruta_storage: str) -> bool:
     """
     Comprueba si un archivo existe en el bucket, listando su carpeta
     contenedora (Supabase Storage no tiene un "exists" directo).
+
+    Usamos el parámetro "search" para que el filtrado lo haga Supabase
+    del lado del servidor: así no dependemos de que el archivo caiga
+    dentro de la primera página de resultados. Sin "search", list()
+    devuelve por defecto solo 100 objetos, y con carpetas que ya
+    acumulan cientos de archivos (como "uploads/") eso provocaba falsos
+    negativos: el archivo SÍ existía en el bucket, pero como no estaba
+    en esos primeros 100 resultados, existe_archivo() devolvía False y
+    la descarga fallaba con 404 aunque el archivo estuviera ahí.
     """
     if not ruta_storage:
         return False
@@ -233,7 +242,10 @@ def existe_archivo(ruta_storage: str) -> bool:
     nombre = os.path.basename(ruta_storage)
 
     try:
-        items = cliente.storage.from_(BUCKET_NAME).list(carpeta or None)
+        items = cliente.storage.from_(BUCKET_NAME).list(
+            carpeta or None,
+            {"search": nombre, "limit": 10},
+        )
     except Exception:
         logger.exception("Error listando carpeta %s", carpeta)
         return False
