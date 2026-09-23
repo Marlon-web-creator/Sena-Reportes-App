@@ -12,21 +12,29 @@
   </head>
   <body>
     <header class="topbar">
-  <div class="topbar-text">
-    <h1>SENA · Reportes</h1>
-    <p class="subtitle">Automatización de reportes por ficha</p>
-  </div>
-   <a class="btn-database" href="base-datos.html">
-    <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
-         stroke="currentColor" stroke-width="1.8"
-         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <ellipse cx="12" cy="5" rx="8" ry="3" />
-      <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
-      <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
-    </svg>
-    Ver base de datos
-  </a>
-</header>
+      <div class="topbar-text">
+        <h1>SENA · Reportes</h1>
+        <p class="subtitle">Automatización de reportes por ficha</p>
+      </div>
+      <a class="btn-database" href="base-datos.html">
+        <svg
+          viewBox="0 0 24 24"
+          width="16"
+          height="16"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <ellipse cx="12" cy="5" rx="8" ry="3" />
+          <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+          <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+        </svg>
+        Ver base de datos
+      </a>
+    </header>
 
     <main class="dashboard">
       <a class="card" href="no-aprobados.html">
@@ -46,6 +54,14 @@
           EVALUAR".
         </p>
       </a>
+      <a class="card" href="correos.html">
+        <span class="card-tag">Disponible</span>
+        <h2>Correo de Aprendices</h2>
+        <p>
+          Cruza el documento del consolidado con varios archivos xls para traer
+          el correo electrónico.
+        </p>
+      </a>
 
       <a class="card" href="no-programados.html">
         <span class="card-tag">Disponible</span>
@@ -53,15 +69,6 @@
         <p>
           Compara competencias contra PDFs (texto + OCR por página) para marcar
           PROGRAMADO / NO PROGRAMADO.
-        </p>
-      </a>
-
-      <a class="card" href="correos.html">
-        <span class="card-tag">Disponible</span>
-        <h2>Correo de Aprendices</h2>
-        <p>
-          Cruza el documento del consolidado con varios archivos xls para traer
-          el correo electrónico.
         </p>
       </a>
     </main>
