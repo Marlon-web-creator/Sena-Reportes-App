@@ -79,6 +79,36 @@ IDIOMA_OCR = "spa"
 DPI_OCR = int(os.environ.get("NP_OCR_DPI") or 150)
 MIN_CARACTERES_TEXTO_PAGINA = 20
 
+# ------------------------------------------------------------
+# VERIFICACIÓN DE MARCADOR "INSTRUCTOR PENDIENTE / SIN ASIGNAR"
+# ------------------------------------------------------------
+# Palabras que, si aparecen en la MISMA FILA de tabla donde matcheó la
+# competencia, invalidan esa coincidencia como "programado" (el evento
+# existe en el PDF pero no tiene instructor asignado). El set normalizado
+# (tildes/mayúsculas) se arma más abajo, justo después de normalizar_texto().
+_PALABRAS_MARCADOR_PENDIENTE_RAW = ("PENDIENTE", "INSTRUCTOR")
+
+# DPI para el recorte + re-OCR de verificación (Paso 2). Solo se aplica
+# a la franja de la fila donde ya hubo match, no a la página completa.
+DPI_OCR_VERIFICACION = int(os.environ.get("NP_OCR_DPI_VERIFICACION") or 300)
+
+# Margen (en puntos PDF, 1pt = 1/72") que se agrega arriba/abajo de la
+# fila detectada antes de recortar, para no cortar texto por el borde.
+MARGEN_VERIFICACION_PT = float(os.environ.get("NP_MARGEN_VERIFICACION_PT") or 8.0)
+
+# Tolerancia (en puntos PDF) para agrupar palabras en la misma fila de
+# tabla, en páginas con texto digital (no escaneadas).
+TOLERANCIA_FILA_PT = float(os.environ.get("NP_TOLERANCIA_FILA_PT") or 3.0)
+
+# Umbral de similitud difusa para el reconocimiento de las palabras del
+# marcador, para tolerar ruido de OCR incluso a 300 DPI.
+UMBRAL_MARCADOR_PENDIENTE = float(os.environ.get("NP_UMBRAL_MARCADOR") or 0.87)
+
+# v2: cada página ahora también guarda "filas" (texto agrupado por
+# coordenada Y). Se sube la versión para invalidar automáticamente la
+# caché en disco generada por versiones anteriores del script.
+CACHE_FORMATO_VERSION = 2
+
 UMBRAL_SIMILITUD_VENTANA = 0.82
 UMBRAL_COBERTURA = 0.80
 UMBRAL_PALABRA = 0.88
@@ -140,10 +170,12 @@ except Exception as _e:
 
 logger.info(
     "Config: workers_pdf=%d workers_fichas=%d max_ocr=%d cache_max=%s "
-    "ocr=%s ocr_indexado=%s dpi=%d timeout_pdf=%.0fs timeout_ocr=%.0fs disco=%s",
+    "ocr=%s ocr_indexado=%s dpi=%d dpi_verificacion=%d timeout_pdf=%.0fs "
+    "timeout_ocr=%.0fs disco=%s cache_v=%d",
     NUM_WORKERS_PDF, NUM_WORKERS_FICHAS, MAX_OCR_CONCURRENTES,
     PDF_CACHE_MAX_SIZE or "ilimitado", OCR_DISPONIBLE, OCR_EN_INDEXADO, DPI_OCR,
-    TIMEOUT_PDF_PRELOAD, TIMEOUT_OCR_POR_PAGINA, CACHE_DISCO_DIR,
+    DPI_OCR_VERIFICACION, TIMEOUT_PDF_PRELOAD, TIMEOUT_OCR_POR_PAGINA,
+    CACHE_DISCO_DIR, CACHE_FORMATO_VERSION,
 )
 
 
@@ -172,6 +204,11 @@ def normalizar_texto(texto):
     texto = re.sub(r"[^A-Z0-9 ]+", " ", texto)
     texto = re.sub(r"\s+", " ", texto)
     return texto.strip()
+
+
+PALABRAS_MARCADOR_PENDIENTE = {
+    normalizar_texto(w) for w in _PALABRAS_MARCADOR_PENDIENTE_RAW
+}
 
 
 def extraer_competencia(valor):
@@ -229,7 +266,7 @@ def _cache_file_pdf(pdf_path: Path) -> Optional[Path]:
     except OSError:
         return None
     h = hashlib.md5(
-        f"{pdf_path.name}:{st.st_size}:{int(st.st_mtime)}".encode()
+        f"{pdf_path.name}:{st.st_size}:{int(st.st_mtime)}:v{CACHE_FORMATO_VERSION}".encode()
     ).hexdigest()
     return CACHE_DISCO_DIR / f"txt_{h}.json.gz"
 
@@ -401,20 +438,397 @@ class PDFCache:
 # LECTURA DE PDF — texto y OCR, decidido POR PÁGINA
 # ============================================================
 
-def _ocr_pagina(pagina) -> str:
+# ------------------------------------------------------------
+# DETECCIÓN DE COLUMNAS DE LA TABLA
+# ------------------------------------------------------------
+# Agrupar TODAS las palabras de la página solo por coordenada Y (sin
+# distinguir columnas) mezcla texto de "Resultado de aprendizaje" con
+# el de "Instructor" cuando una celda envuelve en más líneas que su
+# vecina — que es exactamente lo que pasa en las plantillas reales
+# (una fila de horario puede envolver en 4 líneas de "Resultado de
+# aprendizaje" mientras "Instructor" solo ocupa 2-3, y ambas columnas
+# comparten alturas Y intermedias). Por eso primero se ubican los
+# límites horizontales de las columnas que importan —usando la fila de
+# encabezado como referencia— y luego cada columna se procesa por
+# separado.
+
+_ENCABEZADOS_COLUMNA = {"RESULTADO", "INSTRUCTOR", "AMBIENTE"}
+
+# Distancia horizontal (puntos PDF) a partir de la cual dos palabras del
+# encabezado se consideran de columnas DISTINTAS en vez de la misma
+# etiqueta (p. ej. "RESULTADO" y "DE" y "APRENDIZAJE" van juntas; el
+# salto hacia "AMBIENTE" es mucho mayor).
+BRECHA_COLUMNA_PT = float(os.environ.get("NP_BRECHA_COLUMNA_PT") or 15.0)
+
+
+def _agrupar_palabras_en_grupos_x(palabras_fila, brecha_min: float):
+    """
+    Agrupa las palabras de UNA fila (ordenadas por x0) en "etiquetas de
+    columna": una brecha horizontal mayor a `brecha_min` entre el final
+    de una palabra y el inicio de la siguiente marca el salto a la
+    columna vecina.
+
+    palabras_fila: lista de tuplas (x0, y0, x1, y1, texto_normalizado),
+    YA ordenada por x0.
+    Devuelve una lista ordenada de {"x0", "x1", "texto"}.
+    """
+    grupos_crudos = []
+    actual = []
+    for p in palabras_fila:
+        if actual and (p[0] - actual[-1][2]) > brecha_min:
+            grupos_crudos.append(actual)
+            actual = []
+        actual.append(p)
+    if actual:
+        grupos_crudos.append(actual)
+
+    return [
+        {
+            "x0": min(p[0] for p in g),
+            "x1": max(p[2] for p in g),
+            "texto": " ".join(p[4] for p in g),
+        }
+        for g in grupos_crudos
+    ]
+
+
+def _detectar_limites_columnas(candidatos, tolerancia_y: float, brecha_columna: float):
+    """
+    candidatos: lista de tuplas (x0, y0, x1, y1, texto_normalizado) de
+    TODAS las palabras de la página, en cualquier sistema de
+    coordenadas (puntos PDF o píxeles) — tolerancia_y y brecha_columna
+    deben estar en esas mismas unidades.
+
+    Ubica la fila de encabezado (la que trae, a una altura similar,
+    tanto "RESULTADO" como "INSTRUCTOR"), agrupa TODAS sus palabras en
+    etiquetas de columna por proximidad horizontal, y calcula los
+    límites de "Resultado de aprendizaje" e "Instructor" como el PUNTO
+    MEDIO con sus columnas vecinas — mucho más robusto que usar la
+    posición cruda de la palabra clave, que puede estar centrada sobre
+    un ancho distinto al de los datos de la fila debajo.
+
+    Devuelve (x0_resultado, x1_resultado, x0_instructor, y_header) o
+    None si no se pudo determinar con confianza (p. ej. página de
+    continuación sin encabezado, u otro formato de tabla).
+    """
+    marcadores = [p for p in candidatos if p[4] in _ENCABEZADOS_COLUMNA]
+    if not marcadores:
+        return None
+
+    por_y = {}
+    for p in marcadores:
+        clave = round(p[1] / tolerancia_y) if tolerancia_y else round(p[1])
+        por_y.setdefault(clave, []).append(p)
+
+    y_header = None
+    for grupo in por_y.values():
+        textos = {p[4] for p in grupo}
+        if "RESULTADO" in textos and "INSTRUCTOR" in textos:
+            y_header = min(p[1] for p in grupo)
+            break
+    if y_header is None:
+        return None
+
+    # Traer TODAS las palabras de esa fila de encabezado (no solo las
+    # de nuestro set de palabras clave), para poder ubicar también las
+    # columnas vecinas y calcular límites por punto medio.
+    fila_completa = sorted(
+        (p for p in candidatos if abs(p[1] - y_header) <= tolerancia_y),
+        key=lambda p: p[0],
+    )
+    if not fila_completa:
+        return None
+
+    grupos = _agrupar_palabras_en_grupos_x(fila_completa, brecha_columna)
+    idx_resultado = next(
+        (i for i, g in enumerate(grupos) if "RESULTADO" in g["texto"].split()), None
+    )
+    idx_instructor = next(
+        (i for i, g in enumerate(grupos) if "INSTRUCTOR" in g["texto"].split()), None
+    )
+    if idx_resultado is None or idx_instructor is None or idx_instructor <= idx_resultado:
+        return None
+
+    # Límite izquierdo de "Resultado": punto medio con la columna
+    # anterior (o su propio borde si es la primera columna de la fila).
+    if idx_resultado > 0:
+        x0_resultado = (grupos[idx_resultado - 1]["x1"] + grupos[idx_resultado]["x0"]) / 2
+    else:
+        x0_resultado = grupos[idx_resultado]["x0"]
+
+    # Límite derecho de "Resultado" = punto medio con la columna
+    # siguiente (normalmente "Ambiente"; si por algún motivo Instructor
+    # viene justo después, el punto medio se calcula con esa).
+    x1_resultado = (grupos[idx_resultado]["x1"] + grupos[idx_resultado + 1]["x0"]) / 2
+
+    # Límite izquierdo de "Instructor" = punto medio con su columna
+    # anterior (típicamente "Ambiente").
+    x0_instructor = (grupos[idx_instructor - 1]["x1"] + grupos[idx_instructor]["x0"]) / 2
+
+    return x0_resultado, x1_resultado, x0_instructor, y_header
+
+
+def _agrupar_columna_en_filas(palabras_columna, tolerancia_y: float):
+    """
+    Agrupa por coordenada Y las palabras YA FILTRADAS a una sola
+    columna (formato PyMuPDF: tuplas x0,y0,x1,y1,texto,...). Al estar
+    restringido a una sola columna, esto sí reconstruye correctamente
+    el texto de una celda que envuelve en varias líneas, sin mezclarse
+    con columnas vecinas.
+    """
+    if not palabras_columna:
+        return []
+    palabras_columna = sorted(palabras_columna, key=lambda w: (w[1], w[0]))
+
+    crudas, actual, y_ref = [], [], None
+    for w in palabras_columna:
+        y0 = w[1]
+        if y_ref is None or (y0 - y_ref) <= tolerancia_y:
+            actual.append(w)
+            if y_ref is None:
+                y_ref = y0
+        else:
+            crudas.append(actual)
+            actual = [w]
+            y_ref = y0
+    if actual:
+        crudas.append(actual)
+
+    filas = []
+    for grupo in crudas:
+        grupo_ordenado = sorted(grupo, key=lambda w: w[0])
+        texto = " ".join(w[4] for w in grupo_ordenado)
+        filas.append({
+            "y0": min(w[1] for w in grupo_ordenado),
+            "y1": max(w[3] for w in grupo_ordenado),
+            "texto_original": texto,
+            "texto_normalizado": normalizar_texto(texto),
+        })
+    return filas
+
+
+def _extraer_estructura_columnas_digital(pagina, tolerancia_y: float = TOLERANCIA_FILA_PT):
+    """
+    Para una página con texto digital: ubica las columnas "Resultado
+    de aprendizaje" (donde vive la frase de la competencia a verificar)
+    e "Instructor" (donde vive el marcador PENDIENTE/INSTRUCTOR), y
+    devuelve el texto de cada una reconstruido por filas, de arriba
+    hacia abajo, ya limpio de contaminación entre columnas.
+
+    Devuelve {"resultado": [...], "instructor": [...], "x0_instructor": float}
+    o None si no se pudo ubicar el encabezado de la tabla en esta página.
+    """
+    try:
+        palabras = pagina.get_text("words")  # (x0,y0,x1,y1,texto,block,line,word_no)
+    except Exception:
+        logger.exception("No se pudo extraer 'words' de la página")
+        return None
+    if not palabras:
+        return None
+
+    candidatos = [(w[0], w[1], w[2], w[3], normalizar_texto(w[4])) for w in palabras]
+    limites = _detectar_limites_columnas(candidatos, tolerancia_y, BRECHA_COLUMNA_PT)
+    if limites is None:
+        return None
+    x0_res, x1_res, x0_ins, y_header = limites
+
+    palabras_resultado, palabras_instructor = [], []
+    for w in palabras:
+        x0, y0 = w[0], w[1]
+        if y0 <= y_header + tolerancia_y:
+            continue  # es parte de la fila de encabezado, no de los datos
+        if x0_res <= x0 < x1_res:
+            palabras_resultado.append(w)
+        elif x0 >= x1_res:
+            # Todo lo que queda a la derecha de "Resultado" (Ambiente +
+            # Instructor combinados). Se combinan a propósito: cuando
+            # una fila no tiene instructor asignado, el texto
+            # "PENDIENTE PARA PROGRAMAR..." suele quedar centrado sobre
+            # la celda fusionada Ambiente+Instructor, y una palabra
+            # como "PENDIENTE" puede caer del lado de "Ambiente" — que
+            # se perdería si solo mirásemos la columna "Instructor"
+            # en sentido estricto.
+            palabras_instructor.append(w)
+
+    return {
+        "resultado": _agrupar_columna_en_filas(palabras_resultado, tolerancia_y),
+        "instructor": _agrupar_columna_en_filas(palabras_instructor, tolerancia_y),
+        "x0_instructor": x1_res,
+    }
+
+
+def _agrupar_filas_ocr(datos_ocr: dict, dpi: float) -> list:
+    """
+    Agrupa la salida de pytesseract.image_to_data (Output.DICT) en
+    "filas", usando el agrupamiento por línea que ya hace Tesseract
+    (block_num/par_num/line_num), y convierte las coordenadas de
+    píxeles de vuelta a puntos PDF (para poder recortar luego sobre la
+    página original a cualquier DPI).
+    """
+    n = len(datos_ocr.get("text", []))
+    if n == 0:
+        return []
+
+    escala = dpi / 72.0
+    filas_dict = OrderedDict()
+    for i in range(n):
+        texto = (datos_ocr["text"][i] or "").strip()
+        if not texto:
+            continue
+        clave = (datos_ocr["block_num"][i], datos_ocr["par_num"][i], datos_ocr["line_num"][i])
+        filas_dict.setdefault(clave, []).append({
+            "x": datos_ocr["left"][i],
+            "y": datos_ocr["top"][i],
+            "w": datos_ocr["width"][i],
+            "h": datos_ocr["height"][i],
+            "texto": texto,
+        })
+
+    filas = []
+    for palabras in filas_dict.values():
+        palabras_ordenadas = sorted(palabras, key=lambda p: p["x"])
+        texto = " ".join(p["texto"] for p in palabras_ordenadas)
+        y0_px = min(p["y"] for p in palabras_ordenadas)
+        y1_px = max(p["y"] + p["h"] for p in palabras_ordenadas)
+        filas.append({
+            "y0": y0_px / escala,
+            "y1": y1_px / escala,
+            "texto_original": texto,
+            "texto_normalizado": normalizar_texto(texto),
+        })
+    filas.sort(key=lambda f: f["y0"])
+    return filas
+
+
+def _agrupar_columna_ocr_en_filas(palabras_columna, tolerancia_y_px: float, escala: float):
+    """
+    Igual que _agrupar_columna_en_filas, pero para palabras de OCR
+    (dicts con x,y,w,h,texto en píxeles). Convierte las coordenadas de
+    vuelta a puntos PDF al final, para que el resto del pipeline
+    (recorte a alta resolución, etc.) trabaje siempre en puntos.
+    """
+    if not palabras_columna:
+        return []
+    palabras_columna = sorted(palabras_columna, key=lambda p: (p["y"], p["x"]))
+
+    crudas, actual, y_ref = [], [], None
+    for p in palabras_columna:
+        if y_ref is None or (p["y"] - y_ref) <= tolerancia_y_px:
+            actual.append(p)
+            if y_ref is None:
+                y_ref = p["y"]
+        else:
+            crudas.append(actual)
+            actual = [p]
+            y_ref = p["y"]
+    if actual:
+        crudas.append(actual)
+
+    filas = []
+    for grupo in crudas:
+        grupo_ordenado = sorted(grupo, key=lambda p: p["x"])
+        texto = " ".join(p["texto"] for p in grupo_ordenado)
+        y0_px = min(p["y"] for p in grupo_ordenado)
+        y1_px = max(p["y"] + p["h"] for p in grupo_ordenado)
+        filas.append({
+            "y0": y0_px / escala,
+            "y1": y1_px / escala,
+            "texto_original": texto,
+            "texto_normalizado": normalizar_texto(texto),
+        })
+    return filas
+
+
+def _extraer_estructura_columnas_ocr(datos_ocr: dict, dpi: float):
+    """
+    Equivalente a _extraer_estructura_columnas_digital, pero a partir
+    de la salida de pytesseract.image_to_data de una página escaneada.
+    No hace OCR adicional: reutiliza los mismos datos ya obtenidos.
+    """
+    n = len(datos_ocr.get("text", []))
+    if n == 0:
+        return None
+
+    escala = dpi / 72.0
+    tolerancia_y_px = TOLERANCIA_FILA_PT * escala
+
+    palabras = []
+    for i in range(n):
+        texto = (datos_ocr["text"][i] or "").strip()
+        if not texto:
+            continue
+        palabras.append({
+            "x": datos_ocr["left"][i], "y": datos_ocr["top"][i],
+            "w": datos_ocr["width"][i], "h": datos_ocr["height"][i],
+            "texto": texto,
+        })
+    if not palabras:
+        return None
+
+    candidatos = [
+        (p["x"], p["y"], p["x"] + p["w"], p["y"] + p["h"], normalizar_texto(p["texto"]))
+        for p in palabras
+    ]
+    brecha_columna_px = BRECHA_COLUMNA_PT * escala
+    limites = _detectar_limites_columnas(candidatos, tolerancia_y_px, brecha_columna_px)
+    if limites is None:
+        return None
+    x0_res, x1_res, x0_ins, y_header = limites
+
+    pal_resultado, pal_instructor = [], []
+    for p in palabras:
+        if p["y"] <= y_header + tolerancia_y_px:
+            continue
+        if x0_res <= p["x"] < x1_res:
+            pal_resultado.append(p)
+        elif p["x"] >= x1_res:
+            # Ver comentario equivalente en _extraer_estructura_columnas_digital:
+            # se combina Ambiente+Instructor a propósito.
+            pal_instructor.append(p)
+
+    return {
+        "resultado": _agrupar_columna_ocr_en_filas(pal_resultado, tolerancia_y_px, escala),
+        "instructor": _agrupar_columna_ocr_en_filas(pal_instructor, tolerancia_y_px, escala),
+        "x0_instructor": x1_res / escala,  # en puntos PDF
+    }
+
+
+def _ocr_pagina_datos(pagina):
+    """
+    Hace UNA sola pasada de OCR sobre la página completa (a DPI_OCR, el
+    mismo de siempre — no se sube el costo del Paso 1) usando
+    image_to_data en vez de image_to_string. Con esos datos:
+      - Se reconstruye el texto de la página en orden de líneas
+        (arriba->abajo, izquierda->derecha), lo cual además mejora la
+        precisión del matching actual "de regalo".
+      - Se arma la estructura de columnas (Resultado/Instructor) para
+        que el Paso 2 pueda ubicar y verificar la fila exacta del
+        match, sin OCR adicional.
+
+    Devuelve (texto_reconstruido, columnas).
+    """
     if not OCR_DISPONIBLE:
-        return ""
+        return "", None
     with _OCR_SEMAPHORE:
         matriz = fitz.Matrix(DPI_OCR / 72, DPI_OCR / 72)
         pix = pagina.get_pixmap(matrix=matriz, alpha=False)
         imagen = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         try:
-            return pytesseract.image_to_string(
-                imagen, lang=IDIOMA_OCR, timeout=TIMEOUT_OCR_POR_PAGINA
-            ) or ""
+            datos = pytesseract.image_to_data(
+                imagen, lang=IDIOMA_OCR, timeout=TIMEOUT_OCR_POR_PAGINA,
+                output_type=pytesseract.Output.DICT,
+            )
         except RuntimeError as e:
             logger.warning("OCR timeout en página: %s", e)
-            return ""
+            return "", None
+        except Exception:
+            logger.exception("Error en OCR (image_to_data) de página")
+            return "", None
+
+    filas_planas = _agrupar_filas_ocr(datos, DPI_OCR)
+    texto_reconstruido = "\n".join(f["texto_original"] for f in filas_planas)
+    columnas = _extraer_estructura_columnas_ocr(datos, DPI_OCR)
+    return texto_reconstruido, columnas
 
 
 def _extraer_pdf(pdf_path: Path, permitir_ocr: bool):
@@ -441,16 +855,18 @@ def _extraer_pdf(pdf_path: Path, permitir_ocr: bool):
             t_pag = time.time()
             texto_original = pagina.get_text("text") or ""
             texto_normalizado = normalizar_texto(texto_original)
+            columnas = _extraer_estructura_columnas_digital(pagina)
             metodo = "TEXTO"
 
             if (permitir_ocr and OCR_DISPONIBLE
                     and len(texto_normalizado) < MIN_CARACTERES_TEXTO_PAGINA):
                 ocr_intentado = True          # ← aunque falle, ya no reintentamos
-                texto_ocr = _ocr_pagina(pagina)
+                texto_ocr, columnas_ocr = _ocr_pagina_datos(pagina)
                 texto_ocr_normalizado = normalizar_texto(texto_ocr)
                 if len(texto_ocr_normalizado) > len(texto_normalizado):
                     texto_original = texto_ocr
                     texto_normalizado = texto_ocr_normalizado
+                    columnas = columnas_ocr
                     metodo = "OCR"
                     paginas_con_ocr += 1
 
@@ -459,6 +875,11 @@ def _extraer_pdf(pdf_path: Path, permitir_ocr: bool):
                 "original": texto_original,
                 "normalizado": texto_normalizado,
                 "metodo": metodo,
+                # None si no se pudo ubicar el encabezado de la tabla en
+                # esta página (p. ej. página de continuación): en ese
+                # caso el Paso 2 simplemente no podrá verificar el
+                # marcador y la coincidencia se toma tal cual.
+                "columnas": columnas,
             })
             if time.time() - t_pag > 5:
                 logger.warning(
@@ -730,11 +1151,280 @@ def calcular_similitud_conservadora(texto_pagina, frase):
     return True, max(mejor_global, mejor_cobertura), tipo
 
 
+# ============================================================
+# PASO 2: UBICAR LA FILA DEL MATCH Y VERIFICAR MARCADOR
+# ============================================================
+
+def _construir_texto_indexado(fragmentos):
+    """
+    Concatena el texto normalizado de los fragmentos de UNA columna (en
+    orden), y devuelve también, por cada fragmento con texto, el rango
+    [inicio, fin) que ocupa en ese texto concatenado. Sirve para, dada
+    una posición de match, saber qué fragmento(s) la generaron.
+    """
+    texto = ""
+    rangos = []  # (inicio, fin, indice_fragmento)
+    for idx, frag in enumerate(fragmentos):
+        t = frag.get("texto_normalizado") or ""
+        if not t:
+            continue
+        inicio = len(texto) + (1 if texto else 0)
+        texto = f"{texto} {t}" if texto else t
+        rangos.append((inicio, len(texto), idx))
+    return texto, rangos
+
+
+def _filas_para_rango(rangos, num_fragmentos, pos_inicio, pos_fin, margen_filas=1):
+    indices = [idx for (ini, fin, idx) in rangos if fin > pos_inicio and ini < pos_fin]
+    if not indices:
+        return None
+    primero = max(0, min(indices) - margen_filas)
+    ultimo = min(num_fragmentos - 1, max(indices) + margen_filas)
+    return primero, ultimo
+
+
+def _localizar_filas_del_match(fragmentos, frase, margen_filas: int = 0):
+    """
+    Ubica qué fragmento(s) de la columna "Resultado de aprendizaje"
+    (reconstruidos por _extraer_estructura_columnas_digital /
+    _extraer_estructura_columnas_ocr) generaron el match de `frase`,
+    para poder ubicar la fila exacta en el Paso 2.
+
+    margen_filas se deja en 0 por defecto a propósito: sumar
+    fragmentos ENTEROS de más podría arrastrar información de otra
+    fila de tabla. El margen de tolerancia para no cortar texto por el
+    borde se aplica en puntos PDF al recortar (MARGEN_VERIFICACION_PT),
+    no sumando fragmentos.
+
+    Devuelve (idx_inicio, idx_fin) o None si no se pudo determinar
+    (por ejemplo, página sin columnas detectables).
+    """
+    if not fragmentos:
+        return None
+
+    texto, rangos = _construir_texto_indexado(fragmentos)
+    if not texto:
+        return None
+
+    # 1) Intento exacto (mismo criterio que buscar_exactamente_en_pagina).
+    pos = texto.find(frase)
+    if pos >= 0:
+        rango = _filas_para_rango(rangos, len(fragmentos), pos, pos + len(frase), margen_filas)
+        if rango:
+            return rango
+
+    # 2) Intento difuso: ventana deslizante de fragmentos consecutivos,
+    #    buscando el grupo más parecido a la frase completa.
+    palabras_frase = palabras_importantes(frase)
+    if len(palabras_frase) < 3:
+        return None
+
+    longitud_objetivo = max(1, len(frase.split()))
+    tope_palabras = longitud_objetivo * 2 + 10
+    mejor_score, mejor_rango = 0.0, None
+    n = len(fragmentos)
+    for i in range(n):
+        acumulado = ""
+        for j in range(i, n):
+            t = fragmentos[j].get("texto_normalizado") or ""
+            if not t:
+                continue
+            acumulado = f"{acumulado} {t}".strip()
+            if len(acumulado.split()) > tope_palabras:
+                break
+            score = fuzz.ratio(frase, acumulado) / 100.0
+            if score > mejor_score:
+                mejor_score, mejor_rango = score, (i, j)
+
+    if mejor_rango and mejor_score >= 0.55:
+        i, j = mejor_rango
+        return (max(0, i - margen_filas), min(n - 1, j + margen_filas))
+    return None
+
+
+def _localizar_todas_las_filas_del_match(fragmentos, frase, margen_filas: int = 0):
+    """
+    A diferencia de _localizar_filas_del_match (una sola ubicación),
+    enumera TODAS las apariciones EXACTAS de `frase` en el texto
+    reconstruido de la columna "Resultado de aprendizaje" de la página.
+
+    Es necesario porque una misma competencia puede repetirse varias
+    veces en una misma página — típicamente una fila con instructor
+    asignado y otra idéntica "PENDIENTE PARA PROGRAMAR EL PRÓXIMO
+    TRIMESTRE" (como ocurre en la ficha 2873758 de ejemplo). Si solo
+    verificáramos la primera aparición, una repetición sin instructor
+    podría enmascarar incorrectamente otra repetición que sí está
+    programada.
+
+    Devuelve una lista de (idx_inicio, idx_fin), una por cada aparición
+    exacta encontrada. Si no hay ninguna aparición exacta (por ejemplo
+    porque la columna no se pudo reconstruir del todo bien), cae al
+    único mejor match difuso.
+    """
+    if not fragmentos:
+        return []
+
+    texto, rangos = _construir_texto_indexado(fragmentos)
+    if not texto:
+        return []
+
+    apariciones = []
+    pos = texto.find(frase)
+    while pos >= 0:
+        rango = _filas_para_rango(rangos, len(fragmentos), pos, pos + len(frase), margen_filas)
+        if rango and rango not in apariciones:
+            apariciones.append(rango)
+        pos = texto.find(frase, pos + 1)
+
+    if apariciones:
+        return apariciones
+
+    rango = _localizar_filas_del_match(fragmentos, frase, margen_filas)
+    return [rango] if rango else []
+
+
+def _contiene_marcador_pendiente(texto_normalizado: str,
+                                  umbral: float = UMBRAL_MARCADOR_PENDIENTE) -> bool:
+    """
+    True si el texto (ya normalizado) contiene, como palabra completa,
+    alguno de los marcadores PENDIENTE/INSTRUCTOR — con tolerancia
+    difusa para ruido de OCR incluso a 300 DPI.
+    """
+    if not texto_normalizado:
+        return False
+    for palabra in texto_normalizado.split():
+        if palabra in PALABRAS_MARCADOR_PENDIENTE:
+            return True
+        if len(palabra) >= 5:
+            for marcador in PALABRAS_MARCADOR_PENDIENTE:
+                if fuzz.ratio(palabra, marcador) / 100.0 >= umbral:
+                    return True
+    return False
+
+
+def _recortar_y_ocr_verificacion(pdf_path: Path, numero_pagina: int,
+                                  y0: float, y1: float,
+                                  x0: Optional[float] = None,
+                                  margen_pt: float = MARGEN_VERIFICACION_PT) -> str:
+    """
+    Reabre el PDF, recorta SOLO la franja [y0-margen, y1+margen] de la
+    página indicada —desde x0 hasta el borde derecho si se da x0 (para
+    acotar a la columna de Instructor), o ancho completo si no— y le
+    hace OCR a DPI_OCR_VERIFICACION (por defecto 300). Es barato porque
+    es una franja pequeña de una sola página, no la página completa ni
+    el documento entero.
+
+    Devuelve el texto normalizado de esa franja, o "" si algo falla
+    (PDF ilegible, OCR no disponible, rango inválido, etc.) — en cuyo
+    caso el llamador debe tratarlo como "no se detectó marcador" para
+    no bloquear coincidencias válidas por un error de infraestructura.
+    """
+    if not OCR_DISPONIBLE:
+        return ""
+    try:
+        documento = fitz.open(str(pdf_path))
+    except Exception:
+        logger.exception("Verificación: no se pudo reabrir %s", pdf_path.name)
+        return ""
+    try:
+        if numero_pagina < 1 or numero_pagina > len(documento):
+            return ""
+        pagina = documento[numero_pagina - 1]
+        rect = pagina.rect
+        x_izq = rect.x0 if x0 is None else max(rect.x0, x0 - margen_pt)
+        clip = fitz.Rect(
+            x_izq,
+            max(rect.y0, y0 - margen_pt),
+            rect.x1,
+            min(rect.y1, y1 + margen_pt),
+        )
+        if clip.width <= 0 or clip.height <= 0:
+            return ""
+
+        matriz = fitz.Matrix(DPI_OCR_VERIFICACION / 72, DPI_OCR_VERIFICACION / 72)
+        pix = pagina.get_pixmap(matrix=matriz, clip=clip, alpha=False)
+        imagen = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        with _OCR_SEMAPHORE:
+            texto = pytesseract.image_to_string(
+                imagen, lang=IDIOMA_OCR, timeout=TIMEOUT_OCR_POR_PAGINA
+            ) or ""
+        return normalizar_texto(texto)
+    except Exception:
+        logger.exception(
+            "Verificación: error recortando/OCR en %s página %d",
+            pdf_path.name, numero_pagina,
+        )
+        return ""
+    finally:
+        documento.close()
+
+
 def ruta_trazabilidad(pdf_path: Path, carpeta_bd: Path):
     try:
         return str(pdf_path.relative_to(carpeta_bd))
     except ValueError:
         return str(pdf_path)
+
+
+MARGEN_ALINEACION_FILA_PT = float(os.environ.get("NP_MARGEN_ALINEACION_PT") or 6.0)
+
+
+def _texto_instructor_alineado(columnas: dict, y0: float, y1: float,
+                                margen: float = MARGEN_ALINEACION_FILA_PT) -> str:
+    """
+    Dado el rango vertical [y0,y1] donde matcheó la competencia en la
+    columna "Resultado de aprendizaje", concatena el texto (ya
+    normalizado, texto digital) de los fragmentos de la columna
+    "Instructor" cuyo rango vertical se solapa con ese, es decir, el
+    contenido de la celda "Instructor" de esa misma fila de tabla.
+    """
+    fragmentos = columnas.get("instructor") or []
+    solapados = [
+        f for f in fragmentos
+        if f["y1"] >= y0 - margen and f["y0"] <= y1 + margen
+    ]
+    return " ".join(f["texto_normalizado"] for f in solapados if f["texto_normalizado"])
+
+
+def _verificar_marcador_para_ocurrencia(pdf_path: Path, pagina: dict, rango) -> tuple:
+    """
+    Dada una página ya extraída (con su "columnas") y el rango de
+    fragmentos de la columna "Resultado" donde matcheó la frase,
+    determina si esa fila tiene el marcador PENDIENTE/INSTRUCTOR.
+
+    - Si la página es de texto digital (metodo == "TEXTO"), el texto de
+      la columna Instructor ya es confiable: se verifica directo, SIN
+      OCR adicional (más rápido y más preciso que cualquier OCR).
+    - Si la página vino de OCR (metodo == "OCR", probablemente a 150
+      DPI), se recorta SOLO la franja de la columna Instructor
+      alineada con esa fila y se le hace OCR de nuevo a
+      DPI_OCR_VERIFICACION para una lectura confiable.
+
+    Devuelve (marcador_detectado: bool, texto_verificacion: str).
+    """
+    columnas = pagina.get("columnas")
+    if rango is None or not columnas:
+        return False, ""
+
+    i, j = rango
+    fragmentos_resultado = columnas.get("resultado") or []
+    if i >= len(fragmentos_resultado) or j >= len(fragmentos_resultado):
+        return False, ""
+    y0 = fragmentos_resultado[i]["y0"]
+    y1 = fragmentos_resultado[j]["y1"]
+
+    if pagina["metodo"] == "TEXTO":
+        texto_instructor = _texto_instructor_alineado(columnas, y0, y1)
+        return _contiene_marcador_pendiente(texto_instructor), texto_instructor
+
+    # metodo == "OCR": recorte + re-OCR a alta resolución, acotado a la
+    # columna Instructor (más preciso y más barato que ancho completo).
+    x0_instructor = columnas.get("x0_instructor")
+    texto_verificacion = _recortar_y_ocr_verificacion(
+        pdf_path, pagina["pagina"], y0, y1, x0=x0_instructor
+    )
+    return _contiene_marcador_pendiente(texto_verificacion), texto_verificacion
 
 
 def analizar_pdf(pdf_path: Path, frase: str, cache: PDFCache, carpeta_bd: Path):
@@ -745,30 +1435,74 @@ def analizar_pdf(pdf_path: Path, frase: str, cache: PDFCache, carpeta_bd: Path):
     if not paginas:
         return [], obs
 
-    coincidencias = []
+    # Cada elemento: (dict_coincidencia_base, pagina, rango_en_columna_resultado|None)
+    candidatos = []
+
     for pagina in paginas:
         if buscar_exactamente_en_pagina(pagina["normalizado"], frase):
-            coincidencias.append({
+            columnas = pagina.get("columnas")
+            fragmentos_resultado = (columnas or {}).get("resultado") or []
+            # >>> Enumerar TODAS las apariciones de la frase en la
+            # columna "Resultado de aprendizaje" de esta página, no
+            # solo la primera (una misma competencia puede repetirse
+            # con y sin instructor asignado en la misma página).
+            apariciones = _localizar_todas_las_filas_del_match(fragmentos_resultado, frase)
+            base = {
                 "archivo": pdf_path.name, "ruta": ruta, "pagina": pagina["pagina"],
                 "metodo_lectura": pagina["metodo"], "tipo": "EXACTA (CTRL+F)",
                 "puntuacion": 1.0,
                 "evidencia": obtener_fragmento(pagina["original"], frase),
-            })
+            }
+            if not apariciones:
+                candidatos.append((dict(base), pagina, None))
+            else:
+                for rango in apariciones:
+                    candidatos.append((dict(base), pagina, rango))
 
-    if coincidencias:
-        return coincidencias, None
+    if not candidatos:
+        for pagina in paginas:
+            coincide, puntuacion, tipo = calcular_similitud_conservadora(
+                pagina["normalizado"], frase
+            )
+            if coincide:
+                columnas = pagina.get("columnas")
+                fragmentos_resultado = (columnas or {}).get("resultado") or []
+                rango = _localizar_filas_del_match(fragmentos_resultado, frase)
+                base = {
+                    "archivo": pdf_path.name, "ruta": ruta, "pagina": pagina["pagina"],
+                    "metodo_lectura": pagina["metodo"], "tipo": tipo,
+                    "puntuacion": puntuacion,
+                    "evidencia": pagina["normalizado"][:700],
+                }
+                candidatos.append((base, pagina, rango))
 
-    for pagina in paginas:
-        coincide, puntuacion, tipo = calcular_similitud_conservadora(
-            pagina["normalizado"], frase
-        )
-        if coincide:
-            coincidencias.append({
-                "archivo": pdf_path.name, "ruta": ruta, "pagina": pagina["pagina"],
-                "metodo_lectura": pagina["metodo"], "tipo": tipo,
-                "puntuacion": puntuacion,
-                "evidencia": pagina["normalizado"][:700],
-            })
+    if not candidatos:
+        return [], None
+
+    # ------------------------------------------------------------
+    # Paso 2 (solo si hubo match): para cada aparición ya ubicada en la
+    # columna "Resultado", verificar si la celda "Instructor" de esa
+    # misma fila trae el marcador PENDIENTE/INSTRUCTOR. En páginas de
+    # texto digital esto es gratis (ya se tiene el texto exacto); en
+    # páginas de OCR se recorta+re-OCR SOLO esa franja a alta
+    # resolución. No se toca el resto de la página ni del documento.
+    # ------------------------------------------------------------
+    coincidencias = []
+    for base, pagina, rango in candidatos:
+        if rango is None:
+            logger.warning(
+                "No se pudo ubicar la fila del match en %s página %d "
+                "(frase: %.60s…); se toma el match sin verificar marcador.",
+                pdf_path.name, base["pagina"], frase,
+            )
+            marcador_detectado, texto_verificacion = False, ""
+        else:
+            marcador_detectado, texto_verificacion = _verificar_marcador_para_ocurrencia(
+                pdf_path, pagina, rango
+            )
+        base["marcador_pendiente"] = marcador_detectado
+        base["texto_verificacion"] = texto_verificacion
+        coincidencias.append(base)
 
     return coincidencias, None
 
@@ -794,10 +1528,16 @@ def analizar_ficha(ficha, filas_validas, pdfs_de_la_ficha, cache: PDFCache, carp
             continue
 
         encontrados = []
+        encontrados_con_marcador = []
         for pdf in pdfs_de_la_ficha:
             coincidencias, obs = analizar_pdf(pdf, frase, cache, carpeta_bd)
-            encontrados.extend(coincidencias)
+            for c in coincidencias:
+                if c.get("marcador_pendiente"):
+                    encontrados_con_marcador.append(c)
+                else:
+                    encontrados.append(c)
 
+        # Solo cuentan como PROGRAMADO las coincidencias sin marcador.
         resultados[fila] = bool(encontrados)
 
         if encontrados:
@@ -809,6 +1549,36 @@ def analizar_ficha(ficha, filas_validas, pdfs_de_la_ficha, cache: PDFCache, carp
             evidencias[fila] = [c["evidencia"] for c in encontrados if c.get("evidencia")]
             observaciones[fila] = (
                 f"Encontrada en {encontrados[0]['ruta']} ({encontrados[0]['tipo']})."
+            )
+        elif encontrados_con_marcador:
+            # Hubo match(es) de la competencia, pero todos en filas con
+            # instructor pendiente/sin asignar → no cuenta como programado,
+            # pero queda trazado (no se pierde la evidencia del hallazgo).
+            rutas_con_marcador = {c["ruta"] for c in encontrados_con_marcador}
+            rutas_revisadas = [ruta_trazabilidad(pdf, carpeta_bd) for pdf in pdfs_de_la_ficha]
+            archivos[fila] = (
+                [
+                    f"{c['ruta']} | Página {c['pagina']} ({c['metodo_lectura']}) "
+                    "— INSTRUCTOR PENDIENTE"
+                    for c in encontrados_con_marcador
+                ]
+                + [
+                    f"{r} (revisado, sin coincidencia válida)"
+                    for r in rutas_revisadas if r not in rutas_con_marcador
+                ]
+            )
+            detalles[fila] = [
+                f"{c['puntuacion']:.0%} | {c['tipo']} | INSTRUCTOR PENDIENTE"
+                for c in encontrados_con_marcador
+            ]
+            evidencias[fila] = [
+                c["texto_verificacion"] for c in encontrados_con_marcador
+                if c.get("texto_verificacion")
+            ]
+            primero = encontrados_con_marcador[0]
+            observaciones[fila] = (
+                f"Encontrada en {primero['ruta']} (página {primero['pagina']}) "
+                "pero con instructor pendiente/sin asignar — no cuenta como programado."
             )
         else:
             rutas_revisadas = [ruta_trazabilidad(pdf, carpeta_bd) for pdf in pdfs_de_la_ficha]
