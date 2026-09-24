@@ -64,19 +64,34 @@ if not logger.handlers:
 # CONFIGURACIÓN
 # ============================================================
 
-FILA_ENCABEZADO = 4
 FILA_INICIO_DATOS = 5
 
 # ------------------------------------------------------------
 # DETECCIÓN PROCEDURAL DE COLUMNAS (por encabezado, no por índice fijo)
 # ------------------------------------------------------------
-# Las columnas de ENTRADA se ubican leyendo el texto real de la fila de
-# encabezado (FILA_ENCABEZADO) y buscando alguna de estas palabras clave
-# (normalizadas: sin tildes, en mayúsculas). Si tu plantilla usa otro
-# texto, agrega el sinónimo correspondiente a la lista.
+# En vez de asumir que el encabezado siempre está en la fila 4, se busca
+# dentro de este rango de filas la que realmente contiene "Código" y
+# "Competencia" (las plantillas traen "FICHA: ..." / "PROGRAMA: ..." en
+# las primeras filas, y a veces esa cantidad de filas varía).
+FILA_ENCABEZADO_MIN = 1
+FILA_ENCABEZADO_MAX = 8
+
+# Palabras clave (normalizadas: sin tildes, en mayúsculas) para ubicar
+# cada columna de ENTRADA por el texto real de su encabezado. Si tu
+# plantilla usa otro texto, agrega el sinónimo correspondiente.
 CLAVES_COL_CODIGO = ["CODIGO"]
 CLAVES_COL_COMPETENCIA = ["COMPETENCIA"]
-CLAVES_COL_DOCUMENTO = ["DOCUMENTO", "IDENTIFICACION", "CEDULA", "N DOCUMENTO", "NO DOCUMENTO"]
+
+# Documento va por NIVELES de prioridad: se intenta el nivel 1 primero
+# en TODA la fila; solo si no aparece ninguna columna de ese nivel se
+# pasa al nivel 2, etc. Esto evita que "Tipo de Documento" (CC/TI, igual
+# para todos) le gane a "Número de Documento" (el identificador real),
+# ya que ambos encabezados contienen la palabra "DOCUMENTO".
+NIVELES_CLAVES_COL_DOCUMENTO = [
+    ["NUMERO DE DOCUMENTO", "NUMERO DOCUMENTO", "N DOCUMENTO", "NO DOCUMENTO"],
+    ["IDENTIFICACION", "CEDULA"],
+    ["DOCUMENTO"],  # último recurso: genérico, puede matchear "Tipo de Documento"
+]
 
 # Las columnas de SALIDA (las que este script escribe) se reconocen por
 # este texto exacto de encabezado si ya existen (ejecución anterior); si
@@ -230,20 +245,33 @@ PALABRAS_MARCADOR_PENDIENTE = {
 # ============================================================
 # Reemplaza los antiguos índices fijos (COL_CODIGO=1, COL_COMPETENCIA=8,
 # COL_ESTADO=11, etc.). Cada hoja del Consolidado_General.xlsx puede
-# tener las columnas en un orden distinto; ubicarlas por el texto real
-# de su encabezado evita que el script lea o escriba sobre la columna
-# equivocada y sobrescriba datos que no le pertenecen.
+# traer las columnas en un orden distinto, o el encabezado en una fila
+# distinta a la 4; ubicarlas por su texto real evita que el script lea
+# o escriba sobre la columna equivocada y sobrescriba datos ajenos.
+
+class ColumnasNoDetectadas(Exception):
+    """
+    Se lanza cuando una hoja no tiene una estructura de encabezado
+    reconocible. A diferencia de un error inesperado, esto NO debe
+    tumbar el procesamiento de las demás hojas del lote: quien llama
+    debe capturarla, registrar la hoja como omitida y seguir con el
+    resto (ver `procesar()`).
+    """
+    pass
+
 
 class ColumnasHoja:
     """Mapa de columnas resuelto para una hoja (ficha) concreta."""
     __slots__ = (
+        "fila_encabezado",
         "codigo", "competencia", "documento",
         "estado", "observacion", "archivos", "detalle", "evidencia",
     )
 
     def __repr__(self):
         return (
-            f"ColumnasHoja(codigo={self.codigo}, competencia={self.competencia}, "
+            f"ColumnasHoja(fila_encabezado={self.fila_encabezado}, "
+            f"codigo={self.codigo}, competencia={self.competencia}, "
             f"documento={self.documento}, estado={self.estado}, "
             f"observacion={self.observacion}, archivos={self.archivos}, "
             f"detalle={self.detalle}, evidencia={self.evidencia})"
@@ -263,6 +291,21 @@ def _buscar_columna_por_claves(ws, fila_encabezado, claves, max_col):
     return None
 
 
+def _buscar_columna_por_niveles(ws, fila_encabezado, niveles, max_col):
+    """
+    Como `_buscar_columna_por_claves`, pero probando listas de claves en
+    orden de prioridad: solo pasa al siguiente nivel si NINGUNA columna
+    de la fila coincidió con el nivel anterior. Sirve para desambiguar
+    encabezados donde una frase específica ("Número de Documento") debe
+    ganarle a una genérica que la contiene ("Tipo de Documento").
+    """
+    for claves in niveles:
+        col = _buscar_columna_por_claves(ws, fila_encabezado, claves, max_col)
+        if col is not None:
+            return col
+    return None
+
+
 def _buscar_columna_por_texto_exacto(ws, fila_encabezado, texto_buscado, max_col):
     """Devuelve la columna cuyo encabezado normalizado coincide EXACTO
     con `texto_buscado`, o None si no existe todavía."""
@@ -274,53 +317,72 @@ def _buscar_columna_por_texto_exacto(ws, fila_encabezado, texto_buscado, max_col
     return None
 
 
+def _localizar_fila_encabezado(ws, max_col):
+    """
+    Recorre FILA_ENCABEZADO_MIN..FILA_ENCABEZADO_MAX buscando la primera
+    fila que contenga a la vez "Código" y "Competencia" — esa es la fila
+    de encabezado real de esta hoja. No asume que siempre es la fila 4,
+    porque la cantidad de filas de título ("FICHA: ...", "PROGRAMA: ...")
+    puede variar entre hojas del mismo libro.
+
+    Devuelve el número de fila, o None si no se encontró en el rango.
+    """
+    limite = min(max_col, ws.max_column) if max_col else ws.max_column
+    for fila in range(FILA_ENCABEZADO_MIN, FILA_ENCABEZADO_MAX + 1):
+        tiene_codigo = _buscar_columna_por_claves(ws, fila, CLAVES_COL_CODIGO, limite) is not None
+        tiene_competencia = _buscar_columna_por_claves(ws, fila, CLAVES_COL_COMPETENCIA, limite) is not None
+        if tiene_codigo and tiene_competencia:
+            return fila
+    return None
+
+
 def detectar_columnas(ws) -> ColumnasHoja:
     """
     Ubica todas las columnas relevantes de `ws` leyendo el texto real de
-    FILA_ENCABEZADO, en vez de asumir índices fijos.
+    su fila de encabezado (detectada automáticamente), en vez de asumir
+    índices ni filas fijas.
 
-    - Columnas de ENTRADA (código, competencia, documento): deben existir
-      ya en la hoja. Si no se encuentran, se lanza ValueError con un
-      mensaje claro — mejor fallar ahora que adivinar un índice y leer/
-      escribir en la columna equivocada.
+    - Columna de encabezado y columnas de ENTRADA (código, competencia,
+      documento): deben existir ya en la hoja. Si no se encuentran, se
+      lanza ColumnasNoDetectadas con un mensaje claro — quien llama
+      decide si omite esa hoja y sigue con las demás (ver `procesar()`).
     - Columnas de SALIDA (estado, observación, archivos, detalle,
       evidencia): se reutilizan si ya existen (por su encabezado exacto,
       de una ejecución anterior) o se crean en la primera columna vacía
       después de la última con contenido en la fila de encabezado
       original — nunca sobre una columna que ya tenía datos.
     """
-    cols = ColumnasHoja()
     max_col_original = ws.max_column
 
+    fila_encabezado = _localizar_fila_encabezado(ws, max_col_original)
+    if fila_encabezado is None:
+        raise ColumnasNoDetectadas(
+            f"Hoja '{ws.title}': no se encontró una fila con encabezados "
+            f"'Código' y 'Competencia' entre las filas "
+            f"{FILA_ENCABEZADO_MIN} y {FILA_ENCABEZADO_MAX}. Esta hoja se "
+            "omitirá; revisa su estructura (o amplía FILA_ENCABEZADO_MAX "
+            "si el título ocupa más filas de lo normal)."
+        )
+
+    cols = ColumnasHoja()
+    cols.fila_encabezado = fila_encabezado
+
     cols.codigo = _buscar_columna_por_claves(
-        ws, FILA_ENCABEZADO, CLAVES_COL_CODIGO, max_col_original
+        ws, fila_encabezado, CLAVES_COL_CODIGO, max_col_original
     )
-    if cols.codigo is None:
-        raise ValueError(
-            f"Hoja '{ws.title}': no se encontró la columna de 'Código' en la "
-            f"fila de encabezado ({FILA_ENCABEZADO}). Verifica el encabezado "
-            "real de esa hoja o agrega el sinónimo a CLAVES_COL_CODIGO."
-        )
-
     cols.competencia = _buscar_columna_por_claves(
-        ws, FILA_ENCABEZADO, CLAVES_COL_COMPETENCIA, max_col_original
+        ws, fila_encabezado, CLAVES_COL_COMPETENCIA, max_col_original
     )
-    if cols.competencia is None:
-        raise ValueError(
-            f"Hoja '{ws.title}': no se encontró la columna de 'Competencia' "
-            f"en la fila de encabezado ({FILA_ENCABEZADO}). Verifica el "
-            "encabezado real o agrega el sinónimo a CLAVES_COL_COMPETENCIA."
-        )
-
-    cols.documento = _buscar_columna_por_claves(
-        ws, FILA_ENCABEZADO, CLAVES_COL_DOCUMENTO, max_col_original
+    cols.documento = _buscar_columna_por_niveles(
+        ws, fila_encabezado, NIVELES_CLAVES_COL_DOCUMENTO, max_col_original
     )
     if cols.documento is None:
-        raise ValueError(
-            f"Hoja '{ws.title}': no se encontró la columna de 'Documento' "
-            f"(identificación del aprendiz, usada para agrupar filas) en la "
-            f"fila de encabezado ({FILA_ENCABEZADO}). Ajusta "
-            "CLAVES_COL_DOCUMENTO con el texto real de esa columna."
+        raise ColumnasNoDetectadas(
+            f"Hoja '{ws.title}': se encontró el encabezado en la fila "
+            f"{fila_encabezado}, pero no la columna de 'Documento' "
+            "(identificación del aprendiz, usada para agrupar filas). "
+            "Ajusta NIVELES_CLAVES_COL_DOCUMENTO con el texto real de esa "
+            "columna."
         )
 
     # Columnas de SALIDA: reutilizar por encabezado exacto si ya existen;
@@ -330,7 +392,7 @@ def detectar_columnas(ws) -> ColumnasHoja:
     def _columna_salida(encabezado_texto):
         nonlocal siguiente_col_libre
         col = _buscar_columna_por_texto_exacto(
-            ws, FILA_ENCABEZADO, encabezado_texto, max_col_original
+            ws, fila_encabezado, encabezado_texto, max_col_original
         )
         if col is not None:
             return col
@@ -1860,12 +1922,19 @@ def procesar(
 
     datos_fichas = {}
     columnas_por_ficha = {}
+    fichas_omitidas_estructura = []
     for ws in wb.worksheets:
         ficha = str(ws.title).strip()
         # Detecta las columnas de ESTA hoja por su encabezado real (no por
-        # índice fijo) y las reutiliza para toda la hoja, en lectura y
-        # escritura, más abajo.
-        cols = detectar_columnas(ws)
+        # índice ni fila fija) y las reutiliza para toda la hoja, en
+        # lectura y escritura, más abajo. Si la hoja no tiene una
+        # estructura reconocible, se OMITE (no tumba el resto del lote).
+        try:
+            cols = detectar_columnas(ws)
+        except ColumnasNoDetectadas as e:
+            logger.warning("Hoja '%s' omitida: %s", ficha, e)
+            fichas_omitidas_estructura.append({"ficha": ficha, "motivo": str(e)})
+            continue
         columnas_por_ficha[ficha] = cols
         logger.info("Hoja '%s': columnas detectadas -> %r", ficha, cols)
 
@@ -1878,6 +1947,13 @@ def procesar(
             if frase:
                 filas_validas.append((fila, codigo, frase, valor_original))
         datos_fichas[ficha] = filas_validas
+
+    if fichas_omitidas_estructura:
+        logger.warning(
+            "%d hoja(s) omitida(s) por estructura no reconocida: %s",
+            len(fichas_omitidas_estructura),
+            [f["ficha"] for f in fichas_omitidas_estructura],
+        )
 
     total_fichas = len(datos_fichas)
     logger.info("Fichas (hojas) con filas válidas: %d", total_fichas)
@@ -1973,17 +2049,18 @@ def procesar(
 
         for ws in wb.worksheets:
             ficha = str(ws.title).strip()
+            cols = columnas_por_ficha.get(ficha)
+            if cols is None:
+                # Hoja omitida en la 1ª pasada (estructura no reconocida):
+                # se deja intacta, sin tocarla.
+                continue
             resultados = resultados_globales.get(ficha, {})
-            # Misma detección de la 1ª pasada: nunca vuelve a asumir un
-            # índice fijo, así que aunque cambie el orden de columnas
-            # entre hojas, cada una escribe en su propia columna real.
-            cols = columnas_por_ficha[ficha]
 
-            ws.cell(FILA_ENCABEZADO, cols.estado).value = ENCABEZADO_ESTADO
-            ws.cell(FILA_ENCABEZADO, cols.observacion).value = ENCABEZADO_OBSERVACION
-            ws.cell(FILA_ENCABEZADO, cols.archivos).value = ENCABEZADO_ARCHIVOS
-            ws.cell(FILA_ENCABEZADO, cols.detalle).value = ENCABEZADO_DETALLE
-            ws.cell(FILA_ENCABEZADO, cols.evidencia).value = ENCABEZADO_EVIDENCIA
+            ws.cell(cols.fila_encabezado, cols.estado).value = ENCABEZADO_ESTADO
+            ws.cell(cols.fila_encabezado, cols.observacion).value = ENCABEZADO_OBSERVACION
+            ws.cell(cols.fila_encabezado, cols.archivos).value = ENCABEZADO_ARCHIVOS
+            ws.cell(cols.fila_encabezado, cols.detalle).value = ENCABEZADO_DETALLE
+            ws.cell(cols.fila_encabezado, cols.evidencia).value = ENCABEZADO_EVIDENCIA
 
             for fila in range(FILA_INICIO_DATOS, ws.max_row + 1):
                 for col in (cols.observacion, cols.archivos, cols.detalle, cols.evidencia):
@@ -2033,6 +2110,7 @@ def procesar(
         "total_pdfs_omitidos": len(pdfs_omitidos),
         "fichas_sin_pdf": fichas_sin_pdf,
         "fichas_con_pdf": fichas_con_pdf,
+        "fichas_omitidas_estructura": fichas_omitidas_estructura,
         "total_programado": total_programado,
         "total_no_programado": total_no_programado,
         "mapa_ficha_pdf": {
