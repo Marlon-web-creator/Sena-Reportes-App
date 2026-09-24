@@ -1,19 +1,23 @@
 """
 modules/correo_aprendices.py
 
-Cruza el número de documento del consolidado (columna configurable, por
-defecto D) contra varios reportes de aprendices .xls/.xlsx/.xlsm y
-escribe el correo encontrado en una columna nueva del consolidado.
+Cruza el número de documento del consolidado contra varios reportes de
+aprendices .xls/.xlsx/.xlsm y escribe el correo encontrado en una columna
+nueva del consolidado.
 
-Las columnas de los REPORTES ya no son fijas (antes B = documento y
-F = correo). Ahora se detectan por hoja, en este orden:
+Tanto en el consolidado como en los reportes, la fila de inicio de los
+datos y las columnas de documento/correo se detectan automáticamente,
+igual que en no_aprobados.py:
 
-  1. Por encabezado ("Documento", "Número de identificación",
-     "Correo Electrónico", "Email", etc.), buscando en la fila
-     inmediatamente anterior a los datos.
-  2. Solo para el correo: por contenido (la columna con más valores
-     que parecen un correo, es decir, con formato algo@dominio).
-  3. Como último recurso, la posición histórica (B / F).
+  - La fila de encabezado se localiza puntuando cada celda contra un
+    catálogo de encabezados típicos ("Documento", "Número de
+    identificación", "Correo Electrónico", "Email", etc.). La fila con
+    mayor puntaje acumulado es el encabezado; los datos empiezan justo
+    debajo.
+  - La columna del documento y la del correo se eligen por encabezado.
+  - Si el correo no se localiza por encabezado, se busca por contenido
+    (la columna con más valores con formato usuario@dominio).
+  - Solo como último recurso se usa la posición histórica (B / F).
 
 La columna de SALIDA en el consolidado tampoco es fija: se reutiliza la
 columna "Correo Electrónico" si ya existe, o se crea justo después de la
@@ -30,10 +34,15 @@ from openpyxl.utils import get_column_letter
 from modules.file_utils import cargar_workbook_compatible
 
 # Posiciones históricas, usadas solo si no se logra detectar la columna.
-COL_DOCUMENTO_XLS_DEFECTO = 2   # B
-COL_CORREO_XLS_DEFECTO = 6      # F
+COL_DOCUMENTO_XLS_DEFECTO = 2            # B
+COL_CORREO_XLS_DEFECTO = 6               # F
+COL_DOCUMENTO_CONSOLIDADO_DEFECTO = 4    # D
 
 ENCABEZADO_CORREO_SALIDA = "Correo Electrónico"
+
+# Cuántas filas desde arriba se inspeccionan buscando el encabezado real
+# (por si hay títulos, logos, filas vacías, etc.).
+MAX_FILAS_BUSQUEDA_ENCABEZADO = 30
 
 _REGEX_CORREO = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -76,7 +85,7 @@ def _normalizar_texto(valor) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Detección de columnas en los reportes
+# Detección de columnas / fila de inicio
 # ---------------------------------------------------------------------------
 
 def _puntuar_encabezado_correo(valor) -> int:
@@ -99,6 +108,29 @@ def _puntuar_encabezado_documento(valor) -> int:
     if any(clave in texto for clave in ("documento", "identificacion", "cedula")):
         return 1
     return 0
+
+
+def _puntuar_encabezado_reporte(valor) -> int:
+    """Puntúa una celda combinando encabezados de documento y correo."""
+    return _puntuar_encabezado_documento(valor) + _puntuar_encabezado_correo(valor)
+
+
+def _detectar_fila_inicio_datos(ws, puntuar, max_filas: int = MAX_FILAS_BUSQUEDA_ENCABEZADO) -> int:
+    """
+    Busca la fila con mayor puntaje acumulado (el encabezado real, aunque
+    arriba haya títulos o filas vacías) y devuelve la fila donde empiezan
+    los datos. Si no encuentra nada, cae al histórico (fila 2).
+    """
+    mejor_puntaje, mejor_fila = 0, 0
+    limite = min(ws.max_row, max_filas)
+    for fila in range(1, limite + 1):
+        puntaje = sum(
+            puntuar(ws.cell(fila, col).value)
+            for col in range(1, ws.max_column + 1)
+        )
+        if puntaje > mejor_puntaje:
+            mejor_puntaje, mejor_fila = puntaje, fila
+    return (mejor_fila + 1) if mejor_fila else 2
 
 
 def _buscar_columna_por_encabezado(ws, fila_inicio: int, puntuar) -> int | None:
@@ -133,11 +165,17 @@ def _buscar_columna_correo_por_contenido(ws, fila_inicio: int, muestra: int = 30
     return max(conteo, key=conteo.get) if conteo else None
 
 
-def detectar_columnas_reporte(ws, fila_inicio: int) -> dict:
+def detectar_columnas_reporte(ws) -> dict:
     """
-    Detecta las columnas de documento y correo de una hoja de reporte.
-    Devuelve {"col_documento", "col_correo", "metodo_documento", "metodo_correo"}.
+    Detecta fila de inicio, columna de documento y columna de correo de
+    una hoja de reporte. No recibe filas ni columnas fijas: todo se
+    infiere del contenido.
+
+    Devuelve {"fila_inicio", "col_documento", "col_correo",
+              "metodo_documento", "metodo_correo"}.
     """
+    fila_inicio = _detectar_fila_inicio_datos(ws, _puntuar_encabezado_reporte)
+
     col_documento = _buscar_columna_por_encabezado(ws, fila_inicio, _puntuar_encabezado_documento)
     metodo_documento = "encabezado"
     if col_documento is None:
@@ -154,6 +192,7 @@ def detectar_columnas_reporte(ws, fila_inicio: int) -> dict:
         metodo_correo = "posicion_defecto"
 
     return {
+        "fila_inicio": fila_inicio,
         "col_documento": col_documento,
         "col_correo": col_correo,
         "metodo_documento": metodo_documento,
@@ -166,7 +205,7 @@ def detectar_columnas_reporte(ws, fila_inicio: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def construir_mapa_documento_correo(
-    archivos_xls: list[Path], fila_inicio: int
+    archivos_xls: list[Path],
 ) -> tuple[dict, dict, list]:
     """
     Recorre todas las hojas de todos los reportes y arma:
@@ -183,12 +222,14 @@ def construir_mapa_documento_correo(
     for archivo in archivos_xls:
         wb = cargar_workbook_compatible(archivo)
         for ws in wb.worksheets:
-            cols = detectar_columnas_reporte(ws, fila_inicio)
+            cols = detectar_columnas_reporte(ws)
             col_doc, col_mail = cols["col_documento"], cols["col_correo"]
+            fila_inicio = cols["fila_inicio"]
 
             detalle_columnas.append({
                 "archivo": Path(archivo).name,
                 "hoja": ws.title,
+                "fila_inicio_datos": fila_inicio,
                 "columna_documento": get_column_letter(col_doc),
                 "columna_correo": get_column_letter(col_mail),
                 "metodo_documento": cols["metodo_documento"],
@@ -214,7 +255,7 @@ def construir_mapa_documento_correo(
 
 
 # ---------------------------------------------------------------------------
-# Columna de salida en el consolidado
+# Detección en el consolidado
 # ---------------------------------------------------------------------------
 
 def _columna_salida(ws, fila_encabezado: int) -> int:
@@ -238,6 +279,24 @@ def _columna_salida(ws, fila_encabezado: int) -> int:
     return ultima_usada + 1
 
 
+def _detectar_documento_consolidado(ws) -> tuple[int, int, int]:
+    """
+    Devuelve (fila_inicio, fila_encabezado, col_documento) detectados en
+    una hoja del consolidado. Todo se infiere del contenido; si no se
+    encuentra encabezado, se cae al histórico (fila 2, columna D).
+    """
+    fila_inicio = _detectar_fila_inicio_datos(ws, _puntuar_encabezado_reporte)
+    fila_encabezado = max(fila_inicio - 1, 1)
+
+    col_documento = _buscar_columna_por_encabezado(
+        ws, fila_inicio, _puntuar_encabezado_documento
+    )
+    if col_documento is None:
+        col_documento = COL_DOCUMENTO_CONSOLIDADO_DEFECTO
+
+    return fila_inicio, fila_encabezado, col_documento
+
+
 # ---------------------------------------------------------------------------
 # Proceso principal
 # ---------------------------------------------------------------------------
@@ -246,18 +305,18 @@ def enriquecer_con_correos(
     consolidado: Path,
     archivos_xls: list[Path],
     salida_dir: Path,
-    fila_inicio_consolidado: int = 2,
-    col_documento_consolidado: int = 4,   # Columna D
-    fila_inicio_xls: int = 2,
 ) -> dict:
     """
     Devuelve estadísticas + ruta del archivo generado. El consolidado
     original no se modifica: se guarda una copia procesada en salida_dir.
+
+    Ni la fila de inicio ni las columnas se reciben por parámetro: se
+    detectan por encabezado/contenido en cada hoja.
     """
     salida_dir.mkdir(parents=True, exist_ok=True)
 
     mapa_correos, duplicados, detalle_columnas = construir_mapa_documento_correo(
-        archivos_xls, fila_inicio_xls
+        archivos_xls
     )
 
     advertencias = [
@@ -271,20 +330,25 @@ def enriquecer_con_correos(
 
     wb = cargar_workbook_compatible(consolidado)
 
-    fila_encabezado = max(fila_inicio_consolidado - 1, 1)
-
     total_documentos = 0
     total_encontrados = 0
     documentos_sin_correo = []
     columnas_salida = []
 
     for ws in wb.worksheets:
+        fila_inicio, fila_encabezado, col_documento = _detectar_documento_consolidado(ws)
+
         col_salida = _columna_salida(ws, fila_encabezado)
-        columnas_salida.append({"hoja": ws.title, "columna": get_column_letter(col_salida)})
+        columnas_salida.append({
+            "hoja": ws.title,
+            "fila_inicio_datos": fila_inicio,
+            "columna_documento": get_column_letter(col_documento),
+            "columna_salida": get_column_letter(col_salida),
+        })
         ws.cell(fila_encabezado, col_salida, ENCABEZADO_CORREO_SALIDA).font = Font(bold=True)
 
-        for fila in range(fila_inicio_consolidado, ws.max_row + 1):
-            documento_valor = ws.cell(fila, col_documento_consolidado).value
+        for fila in range(fila_inicio, ws.max_row + 1):
+            documento_valor = ws.cell(fila, col_documento).value
             documento = _normalizar_documento(documento_valor)
             if not documento:
                 continue

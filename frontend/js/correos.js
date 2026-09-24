@@ -35,9 +35,6 @@ btnProcesar.addEventListener("click", async () => {
   const formData = new FormData();
   formData.append("consolidado", consolidado);
   archivosXls.forEach((a) => formData.append("archivos_xls", a));
-  formData.append("fila_inicio_consolidado", document.getElementById("filaInicioConsolidado").value);
-  formData.append("col_documento_consolidado", document.getElementById("colDocumentoConsolidado").value);
-  formData.append("fila_inicio_xls", document.getElementById("filaInicioXls").value);
 
   btnProcesar.disabled = true;
   progresoEl.classList.remove("oculto");

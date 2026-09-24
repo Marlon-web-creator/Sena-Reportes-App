@@ -1,8 +1,10 @@
 """
 routers/correo_router.py
 
-Endpoints del módulo "Correo de Aprendices": cruza documento (columna D
-del consolidado) contra documento/correo (columnas B/F de varios xls).
+Endpoints del módulo "Correo de Aprendices": cruza el documento del
+consolidado contra documento/correo de varios xls. Las columnas y la
+fila de inicio se detectan automáticamente en cada archivo, así que el
+usuario solo sube los archivos.
 
 Los archivos de entrada y los intermedios se manejan en una carpeta
 temporal (se borra al terminar la petición). El archivo de RESULTADO se
@@ -14,7 +16,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import RedirectResponse
 
 import supabase_storage
@@ -40,9 +42,6 @@ def _subir_generado(ruta_local, id_ejecucion: str) -> str:
 
 @router.post("")
 async def ejecutar_correos(
-    fila_inicio_consolidado: int = Form(2),
-    col_documento_consolidado: int = Form(4),
-    fila_inicio_xls: int = Form(2),
     consolidado: UploadFile = File(...),
     archivos_xls: list[UploadFile] = File(...),
 ):
@@ -80,9 +79,6 @@ async def ejecutar_correos(
                 consolidado=ruta_consolidado,
                 archivos_xls=rutas_xls,
                 salida_dir=carpeta_salida,
-                fila_inicio_consolidado=fila_inicio_consolidado,
-                col_documento_consolidado=col_documento_consolidado,
-                fila_inicio_xls=fila_inicio_xls,
             )
         except HTTPException:
             raise
@@ -97,9 +93,6 @@ async def ejecutar_correos(
         parametros = {
             "consolidado": consolidado.filename,
             "n_archivos_xls": len(rutas_xls),
-            "fila_inicio_consolidado": fila_inicio_consolidado,
-            "col_documento_consolidado": col_documento_consolidado,
-            "fila_inicio_xls": fila_inicio_xls,
         }
         id_bd = guardar_ejecucion(
             modulo=NOMBRE_MODULO,
