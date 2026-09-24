@@ -25,6 +25,8 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 FILA_FICHA = 2
 FILA_CODIGO = 3
 FILA_DENOMINACION = 5
+FILA_FECHA_INICIO = 7
+FILA_FECHA_FIN = 8
 COL_VALOR_ENCABEZADO = 2
 
 FILTROS = {
@@ -122,6 +124,14 @@ def formatear_ficha(valor) -> str:
     return str(valor).strip()
 
 
+def formatear_fecha(valor) -> str:
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return "SIN FECHA"
+    if hasattr(valor, "strftime"):
+        return valor.strftime("%d/%m/%Y")
+    return str(valor).strip()
+
+
 def encontrar_fila_encabezado_tabla(df: pd.DataFrame) -> int:
     for i in range(df.shape[0]):
         valor = df.iat[i, 0]
@@ -187,6 +197,8 @@ def procesar_archivo(path: Path, valor_filtro: str) -> dict:
     ficha = formatear_ficha(leer_valor_encabezado(df, FILA_FICHA))
     codigo = leer_valor_encabezado(df, FILA_CODIGO)
     denominacion = leer_valor_encabezado(df, FILA_DENOMINACION)
+    fecha_inicio = formatear_fecha(leer_valor_encabezado(df, FILA_FECHA_INICIO))
+    fecha_fin = formatear_fecha(leer_valor_encabezado(df, FILA_FECHA_FIN))
     denom_norm = normalizar(denominacion)
 
     carpeta = "RAMOS" if denom_norm in RAMOS_NORM else "GELVES" if denom_norm in GELVES_NORM else None
@@ -212,11 +224,13 @@ def procesar_archivo(path: Path, valor_filtro: str) -> dict:
 
     return {
         "ficha": ficha, "codigo": codigo, "denominacion": denominacion,
+        "fecha_inicio": fecha_inicio, "fecha_fin": fecha_fin,
         "siglas": siglas, "carpeta": carpeta, "filas": filas_salida,
     }
 
 
-def escribir_hoja(wb: Workbook, ficha: str, programa: str, filas: list, filtro: dict):
+def escribir_hoja(wb: Workbook, ficha: str, programa: str, filas: list, filtro: dict,
+                   fecha_inicio: str = "SIN FECHA", fecha_fin: str = "SIN FECHA"):
     nombre_hoja = re.sub(r"[\[\]:\*\?/\\]", "_", ficha)[:31]
 
     nombre_original = nombre_hoja
@@ -237,17 +251,20 @@ def escribir_hoja(wb: Workbook, ficha: str, programa: str, filas: list, filtro: 
     ws.cell(row=1, column=1, value=f"FICHA: {ficha}").font = Font(bold=True, size=13)
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=n_col)
     ws.cell(row=2, column=1, value=f"PROGRAMA: {programa}").font = Font(bold=True, size=11)
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=n_col)
+    ws.cell(row=3, column=1,
+            value=f"FECHA INICIO: {fecha_inicio}    FECHA FIN: {fecha_fin}").font = Font(bold=True, size=11)
 
     for c in range(1, n_col + 1):
         ws.column_dimensions[get_column_letter(c)].width = 22
 
     if not filas:
-        ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=n_col)
-        ws.cell(row=4, column=1,
+        ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=n_col)
+        ws.cell(row=5, column=1,
                 value=f"No hay juicios {etiqueta} para la ficha: {ficha}").font = Font(italic=True)
         return ws
 
-    fila_tabla = 4
+    fila_tabla = 5
     for c, encabezado in enumerate(ENCABEZADOS_SALIDA, start=1):
         ws.cell(row=fila_tabla, column=c, value=encabezado)
     for r, fila in enumerate(filas, start=fila_tabla + 1):
@@ -317,7 +334,10 @@ def consolidar(
             })
             continue
 
-        escribir_hoja(libros[r["carpeta"]], r["ficha"], r["denominacion"], r["filas"], filtro)
+        escribir_hoja(
+            libros[r["carpeta"]], r["ficha"], r["denominacion"], r["filas"], filtro,
+            fecha_inicio=r["fecha_inicio"], fecha_fin=r["fecha_fin"],
+        )
         stats["fichas"][r["carpeta"]] += 1
         stats["coincidencias"][r["carpeta"]] += len(r["filas"])
         stats["detalle_fichas"].append({
@@ -325,7 +345,10 @@ def consolidar(
             "carpeta": r["carpeta"], "coincidencias": len(r["filas"]),
         })
         if generar_general:
-            escribir_hoja(wb_general, r["ficha"], r["denominacion"], r["filas"], filtro)
+            escribir_hoja(
+                wb_general, r["ficha"], r["denominacion"], r["filas"], filtro,
+                fecha_inicio=r["fecha_inicio"], fecha_fin=r["fecha_fin"],
+            )
 
     sufijo = filtro["sufijo"]
     archivos_generados = {}
