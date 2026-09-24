@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import RedirectResponse
@@ -43,12 +44,16 @@ def _subir_generado(ruta_local, id_ejecucion: str) -> str:
 async def ejecutar_depuracion(
     limite: int = Form(20),
     archivo: UploadFile = File(...),
+    # Opcional: si no se envía (o viene en 0) se detecta por los encabezados.
+    fila_encabezado: Optional[int] = Form(None),
 ):
     extension = Path(archivo.filename).suffix.lower()
     if extension not in EXTENSIONES_PERMITIDAS:
         raise HTTPException(status_code=400, detail="El archivo debe ser .xlsx.")
     if limite < 0:
         raise HTTPException(status_code=400, detail="El límite debe ser un número entero positivo.")
+
+    fila_encabezado = fila_encabezado or None
 
     id_ejecucion = uuid.uuid4().hex[:10]
     carpeta_temporal = Path(tempfile.mkdtemp(prefix=f"depuracion_{id_ejecucion}_"))
@@ -67,9 +72,13 @@ async def ejecutar_depuracion(
                 archivo=ruta_entrada,
                 limite=limite,
                 salida_dir=carpeta_salida,
+                fila_encabezado=fila_encabezado,
             )
         except HTTPException:
             raise
+        except ValueError as e:
+            # Estructura del archivo no reconocida (faltan columnas)
+            raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error procesando el archivo: {e}")
 
@@ -78,7 +87,7 @@ async def ejecutar_depuracion(
         ruta_storage = _subir_generado(resultado["archivo_generado"], id_ejecucion)
         resultado["archivo_generado"] = ruta_storage
 
-        parametros = {"limite": limite, "archivo": archivo.filename}
+        parametros = {"limite": limite, "archivo": archivo.filename, "fila_encabezado": fila_encabezado}
         id_bd = guardar_ejecucion(
             modulo=NOMBRE_MODULO,
             parametros=parametros,

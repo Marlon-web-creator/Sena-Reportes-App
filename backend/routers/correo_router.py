@@ -1,8 +1,10 @@
 """
 routers/correo_router.py
 
-Endpoints del módulo "Correo de Aprendices": cruza documento (columna D
-del consolidado) contra documento/correo (columnas B/F de varios xls).
+Endpoints del módulo "Correo de Aprendices": recibe el consolidado y le
+agrega una columna con el correo de cada aprendiz, generado de forma
+procedural a partir de nombres, apellidos y documento (ya no se suben
+archivos xls con correos).
 
 Los archivos de entrada y los intermedios se manejan en una carpeta
 temporal (se borra al terminar la petición). El archivo de RESULTADO se
@@ -13,6 +15,7 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import RedirectResponse
@@ -40,16 +43,23 @@ def _subir_generado(ruta_local, id_ejecucion: str) -> str:
 
 @router.post("")
 async def ejecutar_correos(
-    fila_inicio_consolidado: int = Form(2),
-    col_documento_consolidado: int = Form(4),
-    fila_inicio_xls: int = Form(2),
     consolidado: UploadFile = File(...),
-    archivos_xls: list[UploadFile] = File(...),
+    plantilla: str = Form(correo_aprendices.PLANTILLA_DEFECTO),
+    dominio: str = Form(correo_aprendices.DOMINIO_DEFECTO),
+    # Opcionales: si no se envían (o vienen en 0) se detectan por los encabezados.
+    fila_encabezado: Optional[int] = Form(None),
+    col_documento: Optional[int] = Form(None),
 ):
     if not es_excel(consolidado.filename):
         raise HTTPException(status_code=400, detail="El consolidado debe ser .xls, .xlsx o .xlsm.")
-    if not archivos_xls:
-        raise HTTPException(status_code=400, detail="Debes subir al menos un archivo xls con los correos.")
+
+    try:
+        correo_aprendices.validar_plantilla(plantilla)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    fila_encabezado = fila_encabezado or None
+    col_documento = col_documento or None
 
     id_ejecucion = uuid.uuid4().hex[:10]
     carpeta_temporal = Path(tempfile.mkdtemp(prefix=f"correos_{id_ejecucion}_"))
@@ -63,31 +73,22 @@ async def ejecutar_correos(
         with ruta_consolidado.open("wb") as f:
             shutil.copyfileobj(consolidado.file, f)
 
-        rutas_xls = []
-        for archivo in archivos_xls:
-            if not es_excel(archivo.filename):
-                continue
-            destino = carpeta_entrada / archivo.filename
-            with destino.open("wb") as f:
-                shutil.copyfileobj(archivo.file, f)
-            rutas_xls.append(destino)
-
-        if not rutas_xls:
-            raise HTTPException(status_code=400, detail="Ninguno de los archivos xls subidos es válido.")
-
         try:
-            resultado = correo_aprendices.enriquecer_con_correos(
+            resultado = correo_aprendices.generar_correos_consolidado(
                 consolidado=ruta_consolidado,
-                archivos_xls=rutas_xls,
                 salida_dir=carpeta_salida,
-                fila_inicio_consolidado=fila_inicio_consolidado,
-                col_documento_consolidado=col_documento_consolidado,
-                fila_inicio_xls=fila_inicio_xls,
+                plantilla=plantilla,
+                dominio=dominio,
+                fila_encabezado=fila_encabezado,
+                col_documento=col_documento,
             )
         except HTTPException:
             raise
+        except ValueError as e:
+            # Estructura del consolidado no reconocida / plantilla inválida
+            raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error procesando los archivos: {e}")
+            raise HTTPException(status_code=500, detail=f"Error procesando el consolidado: {e}")
 
         # Subir el resultado a Supabase Storage y reemplazar la ruta
         # local por la ruta dentro del bucket ANTES de guardar en BD.
@@ -96,10 +97,10 @@ async def ejecutar_correos(
 
         parametros = {
             "consolidado": consolidado.filename,
-            "n_archivos_xls": len(rutas_xls),
-            "fila_inicio_consolidado": fila_inicio_consolidado,
-            "col_documento_consolidado": col_documento_consolidado,
-            "fila_inicio_xls": fila_inicio_xls,
+            "plantilla": plantilla,
+            "dominio": dominio,
+            "fila_encabezado": fila_encabezado,
+            "col_documento": col_documento,
         }
         id_bd = guardar_ejecucion(
             modulo=NOMBRE_MODULO,

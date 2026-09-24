@@ -1,43 +1,73 @@
 // correos.js — lógica de la página del módulo Correo de Aprendices
+// El correo se genera a partir de nombres, apellidos y documento del consolidado
+// (ya no se suben archivos xls con correos).
 
 const inputConsolidado = document.getElementById("consolidado");
-const inputXls = document.getElementById("archivosXls");
+const inputPlantilla = document.getElementById("plantilla");
+const inputDominio = document.getElementById("dominio");
+const inputFilaEncabezado = document.getElementById("filaEncabezado");
+const inputColDocumento = document.getElementById("colDocumento");
 const resumenEl = document.getElementById("resumenSeleccion");
+const vistaPreviaEl = document.getElementById("vistaPrevia");
 const btnProcesar = document.getElementById("btnProcesar");
 const progresoEl = document.getElementById("progreso");
 const resultadoEl = document.getElementById("resultado");
 const historialEl = document.getElementById("historial");
 
+const PLANTILLA_DEFECTO = "{inicial}{apellido1}{doc2}";
+const DOMINIO_DEFECTO = "soy.sena.edu.co";
+
+function escapar(texto) {
+  return String(texto ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
 function actualizarResumen() {
   const consolidado = inputConsolidado.files[0];
-  const xls = Array.from(inputXls.files);
-  resumenEl.textContent = consolidado
-    ? `${consolidado.name} · ${xls.length} archivo(s) de correos seleccionados`
-    : "";
+  resumenEl.textContent = consolidado ? consolidado.name : "";
+}
+
+// Vista previa aproximada de la plantilla con un aprendiz de ejemplo.
+// (La generación real y su validación se hacen en el servidor.)
+function actualizarVistaPrevia() {
+  const plantilla = inputPlantilla.value.trim() || PLANTILLA_DEFECTO;
+  const dominio = (inputDominio.value.trim() || DOMINIO_DEFECTO).replace(/^@/, "");
+  const doc = "1000239293";
+  const variables = {
+    nombre1: "chrisbel", nombre2: "yessenia", inicial: "c", iniciales: "cy",
+    apellido1: "choconta", apellido2: "rojas",
+    doc, doc2: doc.slice(-2), doc3: doc.slice(-3), doc4: doc.slice(-4),
+  };
+  let desconocida = null;
+  const usuario = plantilla.replace(/\{(\w+)\}/g, (_, clave) => {
+    if (!(clave in variables)) { desconocida = clave; return ""; }
+    return variables[clave];
+  });
+  vistaPreviaEl.textContent = desconocida
+    ? `⚠ Variable desconocida: {${desconocida}}`
+    : `Ejemplo (CHRISBEL YESSENIA CHOCONTA ROJAS): ${usuario}@${dominio}`;
 }
 
 inputConsolidado.addEventListener("change", actualizarResumen);
-inputXls.addEventListener("change", actualizarResumen);
+inputPlantilla.addEventListener("input", actualizarVistaPrevia);
+inputDominio.addEventListener("input", actualizarVistaPrevia);
 
 btnProcesar.addEventListener("click", async () => {
   const consolidado = inputConsolidado.files[0];
-  const archivosXls = Array.from(inputXls.files);
 
   if (!consolidado) {
     notificar("Selecciona el archivo consolidado.", "warning");
     return;
   }
-  if (archivosXls.length === 0) {
-    notificar("Selecciona al menos un archivo xls con los correos.", "warning");
-    return;
-  }
 
   const formData = new FormData();
   formData.append("consolidado", consolidado);
-  archivosXls.forEach((a) => formData.append("archivos_xls", a));
-  formData.append("fila_inicio_consolidado", document.getElementById("filaInicioConsolidado").value);
-  formData.append("col_documento_consolidado", document.getElementById("colDocumentoConsolidado").value);
-  formData.append("fila_inicio_xls", document.getElementById("filaInicioXls").value);
+  formData.append("plantilla", inputPlantilla.value.trim() || PLANTILLA_DEFECTO);
+  formData.append("dominio", inputDominio.value.trim() || DOMINIO_DEFECTO);
+  // Opcionales: si se dejan vacíos, el servidor los detecta por los encabezados.
+  if (inputFilaEncabezado.value) formData.append("fila_encabezado", inputFilaEncabezado.value);
+  if (inputColDocumento.value) formData.append("col_documento", inputColDocumento.value);
 
   btnProcesar.disabled = true;
   progresoEl.classList.remove("oculto");
@@ -48,7 +78,7 @@ btnProcesar.addEventListener("click", async () => {
     notificar("Procesamiento completado.", "success");
     cargarHistorial();
   } catch (err) {
-    notificar(err.message || "Ocurrió un error al procesar los archivos.", "error");
+    notificar(err.message || "Ocurrió un error al procesar el consolidado.", "error");
   } finally {
     btnProcesar.disabled = false;
     progresoEl.classList.add("oculto");
@@ -57,35 +87,49 @@ btnProcesar.addEventListener("click", async () => {
 
 function renderResultado(resultado) {
   const {
-    id_ejecucion, archivo_generado, total_correos_indexados,
-    total_documentos_consolidado, total_encontrados, total_sin_correo,
-    documentos_sin_correo, documentos_con_correos_distintos,
+    id_ejecucion, archivo_generado, plantilla_usada,
+    total_aprendices, total_documentos_consolidado, total_encontrados,
+    total_sin_correo, documentos_sin_correo = [],
+    correos_con_colision = [], hojas_omitidas = [],
   } = resultado;
 
   const statGridHtml = `
-    <div class="stat-box"><div class="valor">${total_correos_indexados}</div><div class="etiqueta">Correos indexados</div></div>
-    <div class="stat-box"><div class="valor">${total_documentos_consolidado}</div><div class="etiqueta">Documentos en consolidado</div></div>
-    <div class="stat-box"><div class="valor">${total_encontrados}</div><div class="etiqueta">Correos encontrados</div></div>
+    <div class="stat-box"><div class="valor">${total_aprendices}</div><div class="etiqueta">Aprendices</div></div>
+    <div class="stat-box"><div class="valor">${total_documentos_consolidado}</div><div class="etiqueta">Filas en consolidado</div></div>
+    <div class="stat-box"><div class="valor">${total_encontrados}</div><div class="etiqueta">Filas con correo</div></div>
     <div class="stat-box"><div class="valor">${total_sin_correo}</div><div class="etiqueta">Sin correo</div></div>
   `;
 
   const nombreArchivo = archivo_generado.split(/[\\/]/).pop();
   const url = `/api/correos/descargar/${id_ejecucion}/${encodeURIComponent(nombreArchivo)}`;
 
-  const avisoSinCorreo = documentos_sin_correo.length
-    ? `<p class="placeholder">Documentos sin correo (primeros ${documentos_sin_correo.length}): ${documentos_sin_correo.join(", ")}</p>`
+  const avisoPlantilla = plantilla_usada
+    ? `<p class="placeholder">Formato aplicado: ${escapar(plantilla_usada)}</p>`
     : "";
 
-  const claves = Object.keys(documentos_con_correos_distintos || {});
-  const avisoDuplicados = claves.length
-    ? `<p class="placeholder">⚠ Documentos con más de un correo distinto en los archivos fuente: ${claves.join(", ")}</p>`
+  const avisoSinCorreo = documentos_sin_correo.length
+    ? `<p class="placeholder">⚠ Documentos sin nombre/apellido para generar el correo (primeros ${documentos_sin_correo.length}): ${documentos_sin_correo.map(escapar).join(", ")}</p>`
+    : "";
+
+  const avisoColisiones = correos_con_colision.length
+    ? `<p class="placeholder">⚠ Correos repetidos entre aprendices distintos (se les agregó un número; revísalos):<br>${
+        correos_con_colision
+          .map((c) => `${escapar(c.documento_nuevo)} → ${escapar(c.correo_asignado)} (coincidía con ${escapar(c.documento_previo)})`)
+          .join("<br>")
+      }</p>`
+    : "";
+
+  const avisoHojas = hojas_omitidas.length
+    ? `<p class="placeholder">⚠ Hojas omitidas por no tener las columnas Número de Documento / Nombres / Apellidos: ${hojas_omitidas.map(escapar).join(", ")}</p>`
     : "";
 
   resultadoEl.innerHTML = `
     <div class="stat-grid">${statGridHtml}</div>
-    <div class="descargas"><a href="${url}" download>⬇ ${nombreArchivo}</a></div>
+    <div class="descargas"><a href="${url}" download>⬇ ${escapar(nombreArchivo)}</a></div>
+    ${avisoPlantilla}
     ${avisoSinCorreo}
-    ${avisoDuplicados}
+    ${avisoColisiones}
+    ${avisoHojas}
   `;
 }
 
@@ -98,11 +142,12 @@ async function cargarHistorial() {
     }
     historialEl.innerHTML = items
       .map((item) => {
-        const p = item.parametros;
-        const r = item.resultado;
+        const p = item.parametros || {};
+        const r = item.resultado || {};
+        // Las ejecuciones antiguas (con xls) conservan estas mismas claves.
         return `<div class="historial-item">
-          <span class="fecha">${item.fecha}</span> — ${p.consolidado},
-          ${r.total_encontrados}/${r.total_documentos_consolidado} correos encontrados
+          <span class="fecha">${escapar(item.fecha)}</span> — ${escapar(p.consolidado)},
+          ${escapar(r.total_encontrados)}/${escapar(r.total_documentos_consolidado)} filas con correo
         </div>`;
       })
       .join("");
@@ -111,4 +156,5 @@ async function cargarHistorial() {
   }
 }
 
+actualizarVistaPrevia();
 cargarHistorial();
