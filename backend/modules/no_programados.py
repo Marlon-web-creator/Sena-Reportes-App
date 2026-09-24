@@ -64,16 +64,30 @@ if not logger.handlers:
 # CONFIGURACIÓN
 # ============================================================
 
-COL_CODIGO = 1
-COL_COMPETENCIA = 8
+FILA_ENCABEZADO = 4
 FILA_INICIO_DATOS = 5
 
-COL_ESTADO = 11
-COL_OBSERVACION = 12
-COL_ARCHIVOS = 13
-COL_DETALLE = 14
-COL_EVIDENCIA = 15
-COL_DOCUMENTO = 4
+# ------------------------------------------------------------
+# DETECCIÓN PROCEDURAL DE COLUMNAS (por encabezado, no por índice fijo)
+# ------------------------------------------------------------
+# Las columnas de ENTRADA se ubican leyendo el texto real de la fila de
+# encabezado (FILA_ENCABEZADO) y buscando alguna de estas palabras clave
+# (normalizadas: sin tildes, en mayúsculas). Si tu plantilla usa otro
+# texto, agrega el sinónimo correspondiente a la lista.
+CLAVES_COL_CODIGO = ["CODIGO"]
+CLAVES_COL_COMPETENCIA = ["COMPETENCIA"]
+CLAVES_COL_DOCUMENTO = ["DOCUMENTO", "IDENTIFICACION", "CEDULA", "N DOCUMENTO", "NO DOCUMENTO"]
+
+# Las columnas de SALIDA (las que este script escribe) se reconocen por
+# este texto exacto de encabezado si ya existen (ejecución anterior); si
+# no existen, se crean en la primera columna vacía después de la última
+# columna con contenido — nunca se asume un índice fijo ni se escribe
+# sobre una columna que ya tenía datos.
+ENCABEZADO_ESTADO = "Estado Programación"
+ENCABEZADO_OBSERVACION = "Observación"
+ENCABEZADO_ARCHIVOS = "Archivo(s) revisado(s)"
+ENCABEZADO_DETALLE = "Detalle / Similitud"
+ENCABEZADO_EVIDENCIA = "Texto de evidencia"
 
 IDIOMA_OCR = "spa"
 DPI_OCR = int(os.environ.get("NP_OCR_DPI") or 150)
@@ -211,6 +225,128 @@ PALABRAS_MARCADOR_PENDIENTE = {
 }
 
 
+# ============================================================
+# DETECCIÓN PROCEDURAL DE COLUMNAS DEL EXCEL (por encabezado)
+# ============================================================
+# Reemplaza los antiguos índices fijos (COL_CODIGO=1, COL_COMPETENCIA=8,
+# COL_ESTADO=11, etc.). Cada hoja del Consolidado_General.xlsx puede
+# tener las columnas en un orden distinto; ubicarlas por el texto real
+# de su encabezado evita que el script lea o escriba sobre la columna
+# equivocada y sobrescriba datos que no le pertenecen.
+
+class ColumnasHoja:
+    """Mapa de columnas resuelto para una hoja (ficha) concreta."""
+    __slots__ = (
+        "codigo", "competencia", "documento",
+        "estado", "observacion", "archivos", "detalle", "evidencia",
+    )
+
+    def __repr__(self):
+        return (
+            f"ColumnasHoja(codigo={self.codigo}, competencia={self.competencia}, "
+            f"documento={self.documento}, estado={self.estado}, "
+            f"observacion={self.observacion}, archivos={self.archivos}, "
+            f"detalle={self.detalle}, evidencia={self.evidencia})"
+        )
+
+
+def _buscar_columna_por_claves(ws, fila_encabezado, claves, max_col):
+    """Devuelve la 1ª columna (1-based) cuyo encabezado normalizado
+    contiene alguna de `claves`, o None si ninguna coincide."""
+    for col in range(1, max_col + 1):
+        valor = ws.cell(fila_encabezado, col).value
+        if valor is None:
+            continue
+        texto = normalizar_texto(valor)
+        if any(clave in texto for clave in claves):
+            return col
+    return None
+
+
+def _buscar_columna_por_texto_exacto(ws, fila_encabezado, texto_buscado, max_col):
+    """Devuelve la columna cuyo encabezado normalizado coincide EXACTO
+    con `texto_buscado`, o None si no existe todavía."""
+    objetivo = normalizar_texto(texto_buscado)
+    for col in range(1, max_col + 1):
+        valor = ws.cell(fila_encabezado, col).value
+        if valor is not None and normalizar_texto(valor) == objetivo:
+            return col
+    return None
+
+
+def detectar_columnas(ws) -> ColumnasHoja:
+    """
+    Ubica todas las columnas relevantes de `ws` leyendo el texto real de
+    FILA_ENCABEZADO, en vez de asumir índices fijos.
+
+    - Columnas de ENTRADA (código, competencia, documento): deben existir
+      ya en la hoja. Si no se encuentran, se lanza ValueError con un
+      mensaje claro — mejor fallar ahora que adivinar un índice y leer/
+      escribir en la columna equivocada.
+    - Columnas de SALIDA (estado, observación, archivos, detalle,
+      evidencia): se reutilizan si ya existen (por su encabezado exacto,
+      de una ejecución anterior) o se crean en la primera columna vacía
+      después de la última con contenido en la fila de encabezado
+      original — nunca sobre una columna que ya tenía datos.
+    """
+    cols = ColumnasHoja()
+    max_col_original = ws.max_column
+
+    cols.codigo = _buscar_columna_por_claves(
+        ws, FILA_ENCABEZADO, CLAVES_COL_CODIGO, max_col_original
+    )
+    if cols.codigo is None:
+        raise ValueError(
+            f"Hoja '{ws.title}': no se encontró la columna de 'Código' en la "
+            f"fila de encabezado ({FILA_ENCABEZADO}). Verifica el encabezado "
+            "real de esa hoja o agrega el sinónimo a CLAVES_COL_CODIGO."
+        )
+
+    cols.competencia = _buscar_columna_por_claves(
+        ws, FILA_ENCABEZADO, CLAVES_COL_COMPETENCIA, max_col_original
+    )
+    if cols.competencia is None:
+        raise ValueError(
+            f"Hoja '{ws.title}': no se encontró la columna de 'Competencia' "
+            f"en la fila de encabezado ({FILA_ENCABEZADO}). Verifica el "
+            "encabezado real o agrega el sinónimo a CLAVES_COL_COMPETENCIA."
+        )
+
+    cols.documento = _buscar_columna_por_claves(
+        ws, FILA_ENCABEZADO, CLAVES_COL_DOCUMENTO, max_col_original
+    )
+    if cols.documento is None:
+        raise ValueError(
+            f"Hoja '{ws.title}': no se encontró la columna de 'Documento' "
+            f"(identificación del aprendiz, usada para agrupar filas) en la "
+            f"fila de encabezado ({FILA_ENCABEZADO}). Ajusta "
+            "CLAVES_COL_DOCUMENTO con el texto real de esa columna."
+        )
+
+    # Columnas de SALIDA: reutilizar por encabezado exacto si ya existen;
+    # si no, crear después de la última columna con datos (nunca antes).
+    siguiente_col_libre = max_col_original + 1
+
+    def _columna_salida(encabezado_texto):
+        nonlocal siguiente_col_libre
+        col = _buscar_columna_por_texto_exacto(
+            ws, FILA_ENCABEZADO, encabezado_texto, max_col_original
+        )
+        if col is not None:
+            return col
+        col = siguiente_col_libre
+        siguiente_col_libre += 1
+        return col
+
+    cols.estado = _columna_salida(ENCABEZADO_ESTADO)
+    cols.observacion = _columna_salida(ENCABEZADO_OBSERVACION)
+    cols.archivos = _columna_salida(ENCABEZADO_ARCHIVOS)
+    cols.detalle = _columna_salida(ENCABEZADO_DETALLE)
+    cols.evidencia = _columna_salida(ENCABEZADO_EVIDENCIA)
+
+    return cols
+
+
 def extraer_competencia(valor):
     if valor is None:
         return None, None
@@ -243,9 +379,9 @@ def similitud_palabra(a, b):
     return fuzz.ratio(a, b) / 100.0
 
 
-def fila_es_valida(ws, fila):
-    valor_codigo = ws.cell(fila, COL_CODIGO).value
-    valor_competencia = ws.cell(fila, COL_COMPETENCIA).value
+def fila_es_valida(ws, fila, cols: "ColumnasHoja"):
+    valor_codigo = ws.cell(fila, cols.codigo).value
+    valor_competencia = ws.cell(fila, cols.competencia).value
     if valor_codigo is None or valor_competencia is None:
         return False
     texto_codigo = str(valor_codigo).strip().upper()
@@ -1596,7 +1732,7 @@ def analizar_ficha(ficha, filas_validas, pdfs_de_la_ficha, cache: PDFCache, carp
 # REORDENAR FILAS + HOJA DE REPORTE
 # ============================================================
 
-def reordenar_filas_por_estado(ws, resultados):
+def reordenar_filas_por_estado(ws, resultados, cols: "ColumnasHoja"):
     filas = sorted(resultados.keys())
     if len(filas) < 2:
         return
@@ -1628,9 +1764,9 @@ def reordenar_filas_por_estado(ws, resultados):
 
     bloques = []
     bloque_actual = [filas[0]]
-    doc_actual = ws.cell(filas[0], COL_DOCUMENTO).value
+    doc_actual = ws.cell(filas[0], cols.documento).value
     for fila in filas[1:]:
-        doc = ws.cell(fila, COL_DOCUMENTO).value
+        doc = ws.cell(fila, cols.documento).value
         if doc == doc_actual:
             bloque_actual.append(fila)
         else:
@@ -1723,13 +1859,21 @@ def procesar(
         raise FileNotFoundError(f"No hay PDFs en: {carpeta_bd}")
 
     datos_fichas = {}
+    columnas_por_ficha = {}
     for ws in wb.worksheets:
         ficha = str(ws.title).strip()
+        # Detecta las columnas de ESTA hoja por su encabezado real (no por
+        # índice fijo) y las reutiliza para toda la hoja, en lectura y
+        # escritura, más abajo.
+        cols = detectar_columnas(ws)
+        columnas_por_ficha[ficha] = cols
+        logger.info("Hoja '%s': columnas detectadas -> %r", ficha, cols)
+
         filas_validas = []
         for fila in range(FILA_INICIO_DATOS, ws.max_row + 1):
-            if not fila_es_valida(ws, fila):
+            if not fila_es_valida(ws, fila, cols):
                 continue
-            valor_original = ws.cell(fila, COL_COMPETENCIA).value
+            valor_original = ws.cell(fila, cols.competencia).value
             codigo, frase = extraer_competencia(valor_original)
             if frase:
                 filas_validas.append((fila, codigo, frase, valor_original))
@@ -1830,24 +1974,30 @@ def procesar(
         for ws in wb.worksheets:
             ficha = str(ws.title).strip()
             resultados = resultados_globales.get(ficha, {})
+            # Misma detección de la 1ª pasada: nunca vuelve a asumir un
+            # índice fijo, así que aunque cambie el orden de columnas
+            # entre hojas, cada una escribe en su propia columna real.
+            cols = columnas_por_ficha[ficha]
 
-            ws.cell(4, COL_ESTADO).value = "Estado Programación"
-            for col in (COL_OBSERVACION, COL_ARCHIVOS, COL_DETALLE, COL_EVIDENCIA):
-                ws.cell(4, col).value = None
+            ws.cell(FILA_ENCABEZADO, cols.estado).value = ENCABEZADO_ESTADO
+            ws.cell(FILA_ENCABEZADO, cols.observacion).value = ENCABEZADO_OBSERVACION
+            ws.cell(FILA_ENCABEZADO, cols.archivos).value = ENCABEZADO_ARCHIVOS
+            ws.cell(FILA_ENCABEZADO, cols.detalle).value = ENCABEZADO_DETALLE
+            ws.cell(FILA_ENCABEZADO, cols.evidencia).value = ENCABEZADO_EVIDENCIA
 
             for fila in range(FILA_INICIO_DATOS, ws.max_row + 1):
-                for col in (COL_OBSERVACION, COL_ARCHIVOS, COL_DETALLE, COL_EVIDENCIA):
+                for col in (cols.observacion, cols.archivos, cols.detalle, cols.evidencia):
                     ws.cell(fila, col).value = None
                 if fila not in resultados:
                     continue
                 if resultados[fila]:
-                    ws.cell(fila, COL_ESTADO).value = "PROGRAMADO"
+                    ws.cell(fila, cols.estado).value = "PROGRAMADO"
                     total_programado += 1
                 else:
-                    ws.cell(fila, COL_ESTADO).value = "NO PROGRAMADO"
+                    ws.cell(fila, cols.estado).value = "NO PROGRAMADO"
                     total_no_programado += 1
 
-            reordenar_filas_por_estado(ws, resultados)
+            reordenar_filas_por_estado(ws, resultados, cols)
     finally:
         cache.shutdown()
 
