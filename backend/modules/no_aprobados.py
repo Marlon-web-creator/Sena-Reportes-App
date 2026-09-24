@@ -34,19 +34,30 @@ FILTROS = {
 
 ESTADOS_POR_EVALUAR = {"EN FORMACION", "CONDICIONADO", "CONDICIONADOS"}
 
-COLUMNAS_A_EXTRAER = [0, 1, 2, 3, 4, 5, 7, 10]
-ENCABEZADOS_SALIDA = [
-    "Código",
-    "Programa",
-    "Tipo de Documento",
-    "Número de Documento",
-    "Nombres",
-    "Apellidos",
-    "Estado",
-    "Competencia",
-    "Juicio de Evaluación",
-    "Funcionario que registró el juicio evaluativo",
+# Columnas que se extraen de la tabla de detalle, identificadas por el
+# TEXTO de su encabezado (normalizado) en vez de por posición fija.
+# Así, si el reporte de SENA cambia el orden de las columnas o inserta
+# alguna nueva (como la columna vacía que aparece hoy entre "Juicio de
+# Evaluación" y "Fecha y Hora..."), la extracción sigue funcionando.
+# Formato: (encabezado_en_el_archivo, nombre_de_columna_en_la_salida)
+COLUMNAS_DESEADAS = [
+    ("Tipo de Documento", "Tipo de Documento"),
+    ("Número de Documento", "Número de Documento"),
+    ("Nombre", "Nombres"),
+    ("Apellidos", "Apellidos"),
+    ("Estado", "Estado"),
+    ("Competencia", "Competencia"),
+    ("Resultado de Aprendizaje", "Resultado de Aprendizaje"),
+    ("Juicio de Evaluación", "Juicio de Evaluación"),
+    ("Funcionario que registro el juicio evaluativo", "Funcionario que registró el juicio evaluativo"),
 ]
+
+# Encabezados usados para filtrar filas (deben existir en COLUMNAS_DESEADAS
+# o poder ubicarse igualmente por nombre).
+ENCABEZADO_JUICIO = "Juicio de Evaluación"
+ENCABEZADO_ESTADO = "Estado"
+
+ENCABEZADOS_SALIDA = ["Código", "Programa"] + [salida for _, salida in COLUMNAS_DESEADAS]
 
 RAMOS = [
     "DESARROLLO CREATIVO DE PRODUCTOS PARA LA INDUSTRIA",
@@ -119,6 +130,56 @@ def encontrar_fila_encabezado_tabla(df: pd.DataFrame) -> int:
     raise ValueError("No se encontró la fila de encabezado de la tabla ('Tipo de Documento').")
 
 
+def mapear_columnas(df: pd.DataFrame, fila_encabezado: int) -> dict:
+    """
+    Recorre la fila de encabezados de la tabla de detalle y arma un
+    diccionario {encabezado_normalizado: índice_de_columna}.
+
+    Esto es lo que hace "procedural" la extracción: en vez de asumir que
+    'Competencia' siempre está en la columna 5 y 'Juicio de Evaluación' en
+    la 7, se busca cada encabezado por su texto. Si el reporte agrega,
+    quita o reordena columnas, la extracción se sigue ubicando sola.
+    """
+    fila = df.iloc[fila_encabezado]
+    mapa = {}
+    for idx, valor in enumerate(fila):
+        nombre = normalizar(valor)
+        if nombre and nombre not in mapa:  # conserva la primera aparición
+            mapa[nombre] = idx
+    return mapa
+
+
+def resolver_indices_columnas(mapa_columnas: dict) -> tuple[list[int], int, int]:
+    """
+    A partir del mapa {encabezado_normalizado: índice}, resuelve:
+    - la lista de índices en el orden de COLUMNAS_DESEADAS
+    - el índice de la columna de 'Juicio de Evaluación' (para filtrar)
+    - el índice de la columna de 'Estado' (para el filtro POR EVALUAR)
+
+    Lanza ValueError con un mensaje claro si falta alguna columna esperada,
+    en vez de fallar silenciosamente o leer datos de la columna equivocada.
+    """
+    faltantes = [
+        encabezado for encabezado, _ in COLUMNAS_DESEADAS
+        if normalizar(encabezado) not in mapa_columnas
+    ]
+    if normalizar(ENCABEZADO_JUICIO) not in mapa_columnas:
+        faltantes.append(ENCABEZADO_JUICIO)
+    if normalizar(ENCABEZADO_ESTADO) not in mapa_columnas:
+        faltantes.append(ENCABEZADO_ESTADO)
+    if faltantes:
+        faltantes_unicos = list(dict.fromkeys(faltantes))
+        raise ValueError(
+            "No se encontraron en el archivo las columnas esperadas: "
+            + ", ".join(faltantes_unicos)
+        )
+
+    idx_columnas = [mapa_columnas[normalizar(encabezado)] for encabezado, _ in COLUMNAS_DESEADAS]
+    idx_juicio = mapa_columnas[normalizar(ENCABEZADO_JUICIO)]
+    idx_estado = mapa_columnas[normalizar(ENCABEZADO_ESTADO)]
+    return idx_columnas, idx_juicio, idx_estado
+
+
 def procesar_archivo(path: Path, valor_filtro: str) -> dict:
     engine = "xlrd" if path.suffix.lower() == ".xls" else "openpyxl"
     df = pd.read_excel(path, header=None, engine=engine)
@@ -134,16 +195,19 @@ def procesar_archivo(path: Path, valor_filtro: str) -> dict:
     filas_salida = []
     if carpeta is not None:
         fila_encabezado = encontrar_fila_encabezado_tabla(df)
+        mapa_columnas = mapear_columnas(df, fila_encabezado)
+        idx_columnas, idx_juicio, idx_estado = resolver_indices_columnas(mapa_columnas)
+
         tabla = df.iloc[fila_encabezado + 1:].reset_index(drop=True)
-        col_juicio = tabla.iloc[:, 7].astype(str).str.strip().str.upper()
+        col_juicio = tabla.iloc[:, idx_juicio].astype(str).str.strip().str.upper()
         coincidencias = tabla[col_juicio == valor_filtro]
 
         if valor_filtro == "POR EVALUAR":
-            col_estado = coincidencias.iloc[:, 4].apply(normalizar)
+            col_estado = coincidencias.iloc[:, idx_estado].apply(normalizar)
             coincidencias = coincidencias[col_estado.isin(ESTADOS_POR_EVALUAR_NORM)]
 
         for _, fila in coincidencias.iterrows():
-            valores = [fila.iloc[c] if c < len(fila) else None for c in COLUMNAS_A_EXTRAER]
+            valores = [fila.iloc[c] if c < len(fila) else None for c in idx_columnas]
             filas_salida.append([codigo, denominacion] + valores)
 
     return {
