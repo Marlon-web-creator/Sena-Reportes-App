@@ -1127,3 +1127,20 @@ a { color: var(--accent); }
 .login-submit { transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease; }
 .btn-primary:hover,
 .login-submit:hover { box-shadow: 0 6px 18px rgba(57, 169, 0, 0.3); }
+
+/* ---------- Footer / Copyright ---------- */
+
+.site-footer {
+  max-width: 1100px;
+  margin: 48px auto 0;
+  padding: 20px 24px 28px;
+  border-top: 1px solid rgba(128, 128, 128, 0.25);
+  text-align: center;
+}
+
+.site-footer p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  letter-spacing: 0.01em;
+}

@@ -14,8 +14,15 @@
     <header class="topbar">
       <div class="topbar-text">
         <h1>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
             <ellipse cx="12" cy="5" rx="8" ry="3" />
             <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
             <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
@@ -29,9 +36,17 @@
         <a class="btn-database" href="index.html">← Volver</a>
 
         <button id="btn-salir" class="btn-logout" type="button">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
-               stroke="currentColor" stroke-width="1.9"
-               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <svg
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.9"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
             <path d="M16 17l5-5-5-5" />
             <path d="M21 12H9" />
@@ -48,10 +63,23 @@
         </button>
         <button class="db-tab" data-tab="generados">Archivos generados</button>
 
-        <button id="btn-eliminar-seleccionados" class="db-tab-danger" type="button" disabled>
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
-               stroke="currentColor" stroke-width="1.9"
-               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <button
+          id="btn-eliminar-seleccionados"
+          class="db-tab-danger"
+          type="button"
+          disabled
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="15"
+            height="15"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.9"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
             <path d="M3 6h18" />
             <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
             <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
@@ -176,7 +204,16 @@
         </table>
       </section>
     </main>
-
+    <footer class="site-footer">
+      <p>
+        © <span id="footer-year">2026</span> SENA Nexus. Centro de Diseño y
+        Metrologia - Marlon Diaz. Todos los derechos reservados.
+      </p>
+      <script>
+        document.getElementById("footer-year").textContent =
+          new Date().getFullYear();
+      </script>
+    </footer>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.js"></script>
     <script src="js/toasts.js"></script>
     <script src="js/modal.js"></script>
