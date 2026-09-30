@@ -5,12 +5,14 @@ Endpoints del módulo "Verificador No Programados". El procesamiento corre
 en un hilo aparte: el POST devuelve de inmediato un id_ejecucion, y el
 frontend consulta /progreso/{id} cada cierto tiempo.
 
-Los PDFs NO se suben por formulario: se toman de la sección "Base de
-Datos" filtrando por modulo = "no_programados". El Consolidado General
-SÍ se sube como adjunto en cada ejecución (campo "excel").
+Los Excels de programación (exports con RAP, instructor que emitió el
+juicio e instructor programado) NO se suben por formulario: se toman de
+la sección "Base de Datos" filtrando por modulo = "no_programados". El
+Consolidado General SÍ se sube como adjunto en cada ejecución (campo
+"excel").
 
-La descarga de PDFs desde Supabase Storage se hace en paralelo con
-timeout por archivo, para que un PDF colgado no bloquee todo.
+La descarga de Excels desde Supabase Storage se hace en paralelo con
+timeout por archivo, para que un archivo colgado no bloquee todo.
 """
 
 import logging
@@ -99,8 +101,8 @@ def _subir_generado(ruta_local, id_ejecucion: str) -> str:
 async def iniciar_procesamiento(excel: UploadFile = File(...)):
     """
     El Excel (Consolidado General) se sube como adjunto en cada
-    ejecución. Los PDFs se toman de la sección "Base de Datos" con
-    modulo = "no_programados".
+    ejecución. Los Excels de programación se toman de la sección "Base
+    de Datos" con modulo = "no_programados".
     """
     t_endpoint = time.time()
     logger.info("POST /api/no-programados — excel=%s", excel.filename)
@@ -113,21 +115,22 @@ async def iniciar_procesamiento(excel: UploadFile = File(...)):
 
     logger.info("Listando archivos de BD con módulo=%s…", NOMBRE_MODULO)
     archivos = listar_archivos_por_modulo(NOMBRE_MODULO)
-    archivos_pdf = [
+    archivos_excel = [
         a for a in archivos
-        if a["nombre_original"].lower().endswith(".pdf")
+        if a["nombre_original"].lower().endswith((".xlsx", ".xlsm"))
+        and not a["nombre_original"].startswith("~$")
     ]
     logger.info(
-        "Archivos en BD con módulo '%s': %d total, %d son PDF",
-        NOMBRE_MODULO, len(archivos), len(archivos_pdf),
+        "Archivos en BD con módulo '%s': %d total, %d son Excel",
+        NOMBRE_MODULO, len(archivos), len(archivos_excel),
     )
 
-    if not archivos_pdf:
+    if not archivos_excel:
         raise HTTPException(
             status_code=400,
             detail=(
-                "No hay ningún PDF en la Base de Datos con el módulo "
-                "'No Programados'. Súbelos primero desde esa sección."
+                "No hay ningún Excel (.xlsx/.xlsm) en la Base de Datos con el "
+                "módulo 'No Programados'. Súbelos primero desde esa sección."
             ),
         )
 
@@ -143,92 +146,102 @@ async def iniciar_procesamiento(excel: UploadFile = File(...)):
     logger.info("Carpeta temporal creada: %s", carpeta_temporal)
 
     try:
-        ruta_excel = carpeta_entrada / excel.filename
+        ruta_excel = carpeta_entrada / Path(excel.filename).name
         t = time.time()
         ruta_excel.write_bytes(await excel.read())
         logger.info("Excel guardado en disco: %s (%.1fs)", ruta_excel, time.time() - t)
 
         # ------------------------------------------------------------
-        # Descarga de PDFs desde Supabase Storage (en paralelo).
-        # Timeout por archivo: un PDF colgado no bloquea toda la
+        # Descarga de Excels desde Supabase Storage (en paralelo).
+        # Timeout por archivo: un archivo colgado no bloquea toda la
         # ejecución, se marca como fallido y se sigue.
         # ------------------------------------------------------------
         logger.info(
-            "Ejecución %s: descargando %d PDF(s) desde Storage (paralelo=%d, timeout=%.0fs)…",
-            id_ejecucion, len(archivos_pdf),
+            "Ejecución %s: descargando %d Excel(s) desde Storage (paralelo=%d, timeout=%.0fs)…",
+            id_ejecucion, len(archivos_excel),
             MAX_DESCARGAS_PARALELAS, TIMEOUT_DESCARGA_POR_ARCHIVO,
         )
         t_descarga = time.time()
-        pdfs_guardados = 0
-        pdfs_fallidos = []
+        excels_guardados = 0
+        excels_fallidos = []
 
-        def _descargar_uno(pdf: dict):
+        def _descargar_uno(archivo: dict):
             """Devuelve (nombre, ok: bool, error: str|None)."""
-            nombre = pdf.get("nombre_original", "?")
+            nombre = archivo.get("nombre_original", "?")
             try:
-                destino = _ruta_local_para_archivo(carpeta_bd, pdf)
+                destino = _ruta_local_para_archivo(carpeta_bd, archivo)
             except ValueError as e:
                 return nombre, False, f"ruta inválida: {e}"
             destino.parent.mkdir(parents=True, exist_ok=True)
             try:
-                datos = supabase_storage.descargar_bytes(pdf["ruta"])
+                datos = supabase_storage.descargar_bytes(archivo["ruta"])
                 destino.write_bytes(datos)
                 return nombre, True, None
             except Exception as e:
                 return nombre, False, f"{type(e).__name__}: {e}"
 
-        with ThreadPoolExecutor(
+        # as_completed solo entrega futuros YA terminados, así que un
+        # result(timeout=...) posterior nunca vence. El timeout se aplica
+        # al conjunto (as_completed(timeout=...)) y el pool se cierra sin
+        # esperar a los hilos colgados.
+        pool = ThreadPoolExecutor(
             max_workers=MAX_DESCARGAS_PARALELAS, thread_name_prefix="np-dl"
-        ) as pool:
-            futuros = {
-                pool.submit(_descargar_uno, pdf): pdf["nombre_original"]
-                for pdf in archivos_pdf
-            }
-            total = len(futuros)
-            procesados = 0
+        )
+        futuros = {
+            pool.submit(_descargar_uno, archivo): archivo["nombre_original"]
+            for archivo in archivos_excel
+        }
+        total = len(futuros)
+        procesados = 0
+        oleadas = -(-total // MAX_DESCARGAS_PARALELAS)  # ceil
+        timeout_total = TIMEOUT_DESCARGA_POR_ARCHIVO * oleadas + 10
+        terminados = set()
 
-            for fut in as_completed(futuros):
+        try:
+            for fut in as_completed(futuros, timeout=timeout_total):
+                terminados.add(fut)
                 nombre = futuros[fut]
                 try:
-                    nombre, ok, err = fut.result(timeout=TIMEOUT_DESCARGA_POR_ARCHIVO)
-                except FuturesTimeout:
-                    logger.warning(
-                        "Timeout descargando %s (> %.0fs), se omite",
-                        nombre, TIMEOUT_DESCARGA_POR_ARCHIVO,
-                    )
-                    pdfs_fallidos.append(nombre)
-                    procesados += 1
-                    continue
+                    nombre, ok, err = fut.result()
                 except Exception:
                     logger.exception("Error inesperado descargando %s", nombre)
-                    pdfs_fallidos.append(nombre)
+                    excels_fallidos.append(nombre)
                     procesados += 1
                     continue
 
                 if ok:
-                    pdfs_guardados += 1
+                    excels_guardados += 1
                 else:
                     logger.warning("Fallo descargando %s: %s", nombre, err)
-                    pdfs_fallidos.append(nombre)
+                    excels_fallidos.append(nombre)
 
                 procesados += 1
                 if procesados % 20 == 0 or procesados == total:
                     seg = time.time() - t_descarga
                     v = procesados / seg if seg > 0 else 0
                     logger.info(
-                        "Descarga Storage: %d/%d PDFs (%.1fs, %.1f PDF/s, %d ok, %d fallidos)",
-                        procesados, total, seg, v, pdfs_guardados, len(pdfs_fallidos),
+                        "Descarga Storage: %d/%d Excels (%.1fs, %.1f archivo/s, %d ok, %d fallidos)",
+                        procesados, total, seg, v, excels_guardados, len(excels_fallidos),
                     )
+        except FuturesTimeout:
+            for fut, nombre in futuros.items():
+                if fut not in terminados:
+                    logger.warning(
+                        "Timeout global de descarga: %s no terminó, se omite", nombre,
+                    )
+                    excels_fallidos.append(nombre)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
-        if pdfs_guardados == 0:
+        if excels_guardados == 0:
             raise HTTPException(
                 status_code=400,
-                detail="No se pudo descargar ningún PDF desde la Base de Datos.",
+                detail="No se pudo descargar ningún Excel desde la Base de Datos.",
             )
 
         logger.info(
-            "Descarga completa: %d PDFs guardados, %d fallidos, total %.1fs",
-            pdfs_guardados, len(pdfs_fallidos), time.time() - t_descarga,
+            "Descarga completa: %d Excels guardados, %d fallidos, total %.1fs",
+            excels_guardados, len(excels_fallidos), time.time() - t_descarga,
         )
     except HTTPException:
         logger.warning(
@@ -269,14 +282,14 @@ async def iniciar_procesamiento(excel: UploadFile = File(...)):
 
                 ruta_storage = _subir_generado(resultado["archivo_generado"], id_ejecucion)
                 resultado["archivo_generado"] = ruta_storage
-                resultado["pdfs_fallidos_al_descargar"] = pdfs_fallidos
+                resultado["excels_fallidos_al_descargar"] = excels_fallidos
 
                 logger.info("Hilo %s: guardando ejecución en BD…", id_ejecucion)
                 guardar_ejecucion(
                     modulo=NOMBRE_MODULO,
                     parametros={
                         "excel": excel.filename,
-                        "n_pdfs": pdfs_guardados,
+                        "n_excels": excels_guardados,
                     },
                     resultado=resultado,
                     archivos_generados={"PROCESADO": ruta_storage},

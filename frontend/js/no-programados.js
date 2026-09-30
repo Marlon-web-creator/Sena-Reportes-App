@@ -32,17 +32,17 @@ btnProcesar.addEventListener("click", async () => {
   btnProcesar.disabled = true;
   bloqueProgreso.classList.remove("oculto");
   barraProgreso.style.width = "0%";
-  mensajeProgreso.textContent = "Subiendo Excel y buscando PDFs en Base de Datos…";
+  mensajeProgreso.textContent = "Subiendo Excel y buscando Excels de programación en Base de Datos…";
   resultadoEl.innerHTML = "<p class='placeholder'>Procesando…</p>";
 
   try {
-    // Los PDFs ya no viajan en el form: el backend los toma de la
-    // sección "Base de Datos" (módulo "no_programados").
+    // Los Excels de programación no viajan en el form: el backend los toma
+    // de la sección "Base de Datos" (módulo "no_programados").
     const { id_ejecucion } = await apiPost("/api/no-programados", formData);
     notificar("Procesamiento iniciado.", "info");
     iniciarPolling(id_ejecucion);
   } catch (err) {
-    // Los mensajes 400 del backend ya explican qué falta (Excel válido, PDFs, etc.)
+    // Los mensajes 400 del backend ya explican qué falta (Excel válido, archivos en Base de Datos, etc.)
     notificar(err.message || "No se pudo iniciar el procesamiento.", "error");
     btnProcesar.disabled = false;
     bloqueProgreso.classList.add("oculto");
@@ -81,35 +81,112 @@ function iniciarPolling(idEjecucion) {
   }, 1500);
 }
 
-function renderResultado(idEjecucion, resultado) {
-  const {
-    archivo_generado, ocr_disponible, total_fichas, total_pdfs_detectados,
-    fichas_sin_pdf, total_programado, total_no_programado,
-  } = resultado;
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
 
-  const statGridHtml = `
-    <div class="stat-box"><div class="valor">${total_fichas}</div><div class="etiqueta">Fichas procesadas</div></div>
-    <div class="stat-box"><div class="valor">${total_pdfs_detectados}</div><div class="etiqueta">PDFs detectados</div></div>
-    <div class="stat-box"><div class="valor">${total_programado}</div><div class="etiqueta">Programado</div></div>
-    <div class="stat-box"><div class="valor">${total_no_programado}</div><div class="etiqueta">No programado</div></div>
-  `;
+function aLista(v) {
+  if (Array.isArray(v)) return v;
+  if (v && typeof v === "object") return Object.keys(v);
+  return [];
+}
+
+function contar(v) {
+  if (typeof v === "number") return v;
+  if (Array.isArray(v)) return v.length;
+  if (v && typeof v === "object") return Object.keys(v).length;
+  return 0;
+}
+
+function renderResultado(idEjecucion, resultado) {
+  const r = resultado || {};
+  const {
+    archivo_generado = "",
+    total_fichas = 0,
+    total_excels_bd = 0,
+    total_programado = 0,
+    total_parcial = 0,
+    total_no_programado = 0,
+    total_sin_coincidencia = 0,
+    raps_por_caso,
+    fichas_sin_bd = [],
+    mapa_ficha_archivos = {},
+    archivos_bd_omitidos = [],
+    excels_fallidos_al_descargar = [],
+    fichas_omitidas_estructura = [],
+  } = r;
+
+  const stat = (valor, etiqueta) =>
+    `<div class="stat-box"><div class="valor">${esc(valor)}</div><div class="etiqueta">${etiqueta}</div></div>`;
+
+  const statGridHtml = [
+    stat(total_fichas, "Fichas procesadas"),
+    stat(total_excels_bd, "Excels de programación"),
+    stat(total_programado, "Con programación"),
+    stat(total_parcial, "Programación parcial"),
+    stat(total_no_programado, "Sin programación"),
+    stat(total_sin_coincidencia, "Sin coincidencia"),
+  ].join("");
 
   const nombreArchivo = archivo_generado.split(/[\\/]/).pop();
   const url = `/api/no-programados/descargar/${idEjecucion}/${encodeURIComponent(nombreArchivo)}`;
 
-  const avisoOcr = ocr_disponible
-    ? ""
-    : `<p class="placeholder">⚠ OCR no disponible en el servidor: solo se leyeron PDFs con texto digital.</p>`;
+  const avisos = [];
 
-  const avisoSinPdf = fichas_sin_pdf.length
-    ? `<p class="placeholder">Fichas sin PDF asociado: ${fichas_sin_pdf.join(", ")}</p>`
+  const sinBd = aLista(fichas_sin_bd);
+  if (sinBd.length) {
+    avisos.push(`Fichas sin Excel de programación en Base de Datos: ${sinBd.map(esc).join(", ")}`);
+  }
+
+  const fallidos = aLista(excels_fallidos_al_descargar);
+  if (fallidos.length) {
+    avisos.push(`⚠ No se pudieron descargar ${fallidos.length} Excel(s): ${fallidos.map((x) => esc(typeof x === "object" ? (x.nombre || x.archivo || JSON.stringify(x)) : x)).join(", ")}`);
+  }
+
+  const omitidos = Array.isArray(archivos_bd_omitidos) ? archivos_bd_omitidos : [];
+  if (omitidos.length) {
+    const det = omitidos
+      .slice(0, 10)
+      .map((o) => `${esc(o.archivo)}${o.hoja ? " [" + esc(o.hoja) + "]" : ""}: ${esc(o.motivo)}`)
+      .join("<br>");
+    avisos.push(`⚠ ${omitidos.length} archivo(s)/hoja(s) de Base de Datos omitidos por estructura no reconocida:<br>${det}`);
+  }
+
+  const hojasOmitidas = Array.isArray(fichas_omitidas_estructura) ? fichas_omitidas_estructura : [];
+  if (hojasOmitidas.length) {
+    avisos.push(`⚠ Hojas del Consolidado omitidas (estructura no reconocida): ${hojasOmitidas.map((h) => esc(h.ficha)).join(", ")}`);
+  }
+
+  const avisosHtml = avisos.map((t) => `<p class="placeholder">${t}</p>`).join("");
+
+  // Detalle por ficha -> archivos usados
+  const fichasMapa = Object.keys(mapa_ficha_archivos || {});
+  const mapaHtml = fichasMapa.length
+    ? `<details><summary>Excels usados por ficha (${fichasMapa.length})</summary><ul>${fichasMapa
+        .map((f) => {
+          const archivos = aLista(mapa_ficha_archivos[f]).map(esc).join(", ");
+          return `<li><strong>${esc(f)}</strong>: ${archivos}</li>`;
+        })
+        .join("")}</ul></details>`
     : "";
+
+  // Distribución de RAPs por caso (estructura flexible: objeto {caso: n|lista})
+  let casosHtml = "";
+  if (raps_por_caso && typeof raps_por_caso === "object" && !Array.isArray(raps_por_caso)) {
+    const filas = Object.keys(raps_por_caso)
+      .map((k) => `<li>${esc(k)}: <strong>${contar(raps_por_caso[k])}</strong></li>`)
+      .join("");
+    if (filas) casosHtml = `<details><summary>RAPs por caso</summary><ul>${filas}</ul></details>`;
+  }
 
   resultadoEl.innerHTML = `
     <div class="stat-grid">${statGridHtml}</div>
-    <div class="descargas"><a href="${url}" download>⬇ ${nombreArchivo}</a></div>
-    ${avisoOcr}
-    ${avisoSinPdf}
+    <div class="descargas"><a href="${url}" download>⬇ ${esc(nombreArchivo)}</a></div>
+    ${avisosHtml}
+    ${casosHtml}
+    ${mapaHtml}
   `;
 }
 
@@ -122,11 +199,14 @@ async function cargarHistorial() {
     }
     historialEl.innerHTML = items
       .map((item) => {
-        const p = item.parametros;
-        const r = item.resultado;
+        const p = item.parametros || {};
+        const r = item.resultado || {};
+        const parcial = r.total_parcial ? ` / ${r.total_parcial} parcial` : "";
+        const nExcels = p.n_excels ?? r.total_excels_bd;
+        const excelsTxt = nExcels != null ? `, ${nExcels} Excel(s) de programación` : "";
         return `<div class="historial-item">
-          <span class="fecha">${item.fecha}</span> — ${p.excel},
-          ${r.total_programado} programado / ${r.total_no_programado} no programado
+          <span class="fecha">${esc(item.fecha)}</span> — ${esc(p.excel)}${excelsTxt},
+          ${r.total_programado ?? 0} con programación${parcial} / ${r.total_no_programado ?? 0} sin programación
         </div>`;
       })
       .join("");
