@@ -553,6 +553,7 @@ a { color: var(--accent); }
 
 .db-page { max-width: 1100px; margin: 0 auto; padding: 28px 24px 56px; }
 
+/* Pestañas */
 .db-tabs {
   display: flex;
   align-items: center;
@@ -581,43 +582,207 @@ a { color: var(--accent); }
 }
 .db-tab:hover { background: var(--panel); color: var(--text); }
 .db-tab.active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
-.db-tab-danger { margin-left: auto; padding: 9px 16px; font-size: 0.85rem; }
 
+/* Botones de eliminar: "seleccionados" empuja ambos a la derecha */
+.db-tab-danger { padding: 9px 16px; font-size: 0.85rem; white-space: nowrap; }
+#btn-eliminar-seleccionados { margin-left: auto; }
+
+/* Paneles */
 .db-panel { display: none; }
 .db-panel.active { display: block; padding: 22px 24px; overflow-x: auto; }
 
+/* Formulario de subida: zona punteada */
 .upload-form {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin-bottom: 20px;
-  padding-bottom: 20px;
-  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+  padding: 16px;
+  background: var(--bg-well);
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  transition: border-color 0.15s ease;
 }
+.upload-form:focus-within { border-color: var(--accent); }
 .upload-form input[type="file"],
-.upload-form input[type="text"] { height: 44px; padding: 0 12px; font-size: 0.87rem; }
+.upload-form input[type="text"] { height: 44px; padding: 0 12px; font-size: 0.87rem; background-color: var(--panel); }
 .upload-form input[type="text"] { flex: 1 1 180px; }
 .upload-form input[type="file"] { flex: 1 1 240px; display: flex; align-items: center; padding: 5px 6px; cursor: pointer; }
 .upload-form button { height: 44px; padding: 0 22px; font-size: 0.87rem; }
 
-.db-table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: 0.87rem; }
-.db-table th {
-  padding: 0 12px 10px;
-  text-align: left;
-  border-bottom: 1px solid var(--border-strong);
+/* Lista de archivos elegidos antes de subir */
+.upload-lista-seleccionados {
+  margin-bottom: 18px;
   color: var(--text-dim);
+  font-family: var(--font-mono);
   font-size: 0.8rem;
+  line-height: 1.7;
+}
+.upload-lista-seleccionados:empty { display: none; }
+
+/* ---------- Tabla: cada fila es una "tarjeta" ---------- */
+
+.db-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: separate;
+  border-spacing: 0 6px;
+  font-size: 0.88rem;
+}
+
+.db-table th {
+  padding: 4px 14px 6px;
+  text-align: left;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.db-table th:last-child { text-align: right; }
+
+.db-table td {
+  padding: 12px 14px;
+  background: var(--bg-well);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.db-table td:first-child { border-left: 1px solid var(--border); border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.db-table td:last-child  { border-right: 1px solid var(--border); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; text-align: right; white-space: nowrap; }
+
+/* Hover y fila seleccionada */
+.db-table tbody tr:hover td { background: var(--panel-raised); border-color: var(--border-strong); }
+.db-table tbody tr:has(input:checked) td { background: var(--accent-dim); border-color: rgba(57, 169, 0, 0.45); }
+
+/* Columnas: nombre destacado, el resto tenue y sin partirse */
+.db-table td.col-nombre { min-width: 220px; }
+.db-table td:not(.col-nombre):not(.col-check):not(:last-child) { color: var(--text-dim); white-space: nowrap; }
+
+/* Fila de "tabla vacía" (el JS inserta una celda con colspan) */
+.db-table td[colspan] {
+  padding: 36px 14px;
+  text-align: center;
+  color: var(--text-faint);
+  font-style: italic;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+}
+
+/* Celda de archivo: icono de extensión + nombre */
+.archivo-nombre { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.archivo-texto { font-weight: 600; overflow-wrap: anywhere; }
+.archivo-icono {
+  --t: var(--text-dim);
+  --td: var(--panel-raised);
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  background: var(--td);
+  color: var(--t);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.ext-pdf                      { --t: #ef7f73; --td: rgba(239, 127, 115, 0.16); }
+.ext-xls, .ext-xlsx, .ext-csv { --t: #4cc410; --td: rgba(76, 196, 16, 0.16); }
+.ext-doc, .ext-docx           { --t: #2fb5ad; --td: rgba(47, 181, 173, 0.16); }
+.ext-zip, .ext-rar            { --t: #e8a93a; --td: rgba(232, 169, 58, 0.16); }
+
+/* Insignia de módulo y estado */
+.badge {
+  display: inline-block;
+  padding: 3px 11px;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--accent-bright);
+  font-size: 0.78rem;
   font-weight: 600;
 }
-.db-table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; font-variant-numeric: tabular-nums; }
-.db-table tbody tr:last-child td { border-bottom: none; }
-.db-table tbody tr:hover td { background: var(--panel-raised); }
-.db-table button { margin-left: 0.5rem; padding: 5px 12px; font-size: 0.78rem; font-weight: 500; }
-.db-table .col-check { width: 36px; padding: 12px 4px 12px 8px; text-align: center; }
-.db-table .col-check input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+.vacio { color: var(--text-faint); }
 
-.select-mover-archivo { height: 34px; padding: 0 30px 0 10px; border-radius: 8px; font-size: 0.8rem; background-position: right 10px center; }
+.estado { display: inline-flex; align-items: center; gap: 7px; font-size: 0.82rem; font-weight: 600; }
+.estado::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.estado.ok    { color: var(--green); }
+.estado.falta { color: var(--red); }
 
+/* Acciones de la fila */
+.acciones { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.acciones .select-mover-archivo { max-width: 170px; }
+.db-table button { margin-left: 0; padding: 6px 13px; font-size: 0.78rem; font-weight: 600; }
+.btn-descargar {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 13px;
+  background: var(--green-dim);
+  color: var(--green);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color 0.15s ease;
+}
+.btn-descargar:hover { border-color: var(--green); }
+
+/* Checkbox de selección */
+.db-table .col-check { width: 44px; padding-right: 4px; text-align: center; }
+.db-table .col-check input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  vertical-align: middle;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.db-table .col-check input[type="checkbox"]:hover { border-color: var(--accent); }
+.db-table .col-check input[type="checkbox"]:checked,
+.db-table .col-check input[type="checkbox"]:indeterminate { background: var(--accent); border-color: var(--accent); }
+.db-table .col-check input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 5.5px;
+  top: 2px;
+  width: 4px;
+  height: 9px;
+  border: solid var(--on-accent);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.db-table .col-check input[type="checkbox"]:indeterminate::after {
+  content: "";
+  position: absolute;
+  left: 3.5px;
+  top: 7px;
+  width: 9px;
+  height: 2px;
+  background: var(--on-accent);
+  border-radius: 2px;
+}
+.db-table .col-check input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-dim); }
+
+/* Selector "mover a carpeta" */
+.select-mover-archivo {
+  height: 34px;
+  padding: 0 30px 0 10px;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  background-position: right 10px center;
+}
+
+/* Breadcrumb */
 .db-breadcrumb {
   display: flex;
   flex-wrap: wrap;
@@ -644,6 +809,7 @@ a { color: var(--accent); }
 .breadcrumb-item.activo:hover { background: transparent; color: var(--text); font-weight: 600; cursor: default; }
 .breadcrumb-sep { padding: 0 2px; color: var(--text-faint); user-select: none; }
 
+/* Carpetas */
 .db-carpetas-toolbar { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
 
 .db-carpetas-grid {
@@ -663,9 +829,9 @@ a { color: var(--accent); }
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   font-size: 0.87rem;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
 }
-.carpeta-card:hover { background: var(--panel-raised); border-color: var(--border-strong); }
+.carpeta-card:hover { background: var(--panel-raised); border-color: var(--accent); transform: translateY(-1px); }
 
 .carpeta-abrir {
   flex: 1;
@@ -682,7 +848,7 @@ a { color: var(--accent); }
   cursor: pointer;
 }
 .carpeta-abrir svg { width: 20px; height: 20px; color: var(--accent); flex-shrink: 0; }
-.carpeta-abrir .nombre { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.carpeta-abrir span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .btn-eliminar-carpeta {
   appearance: none;
@@ -696,6 +862,8 @@ a { color: var(--accent); }
   border: 1px solid transparent;
   border-radius: 8px;
   color: var(--text-faint);
+  font-size: 1.3rem;
+  line-height: 1;
   opacity: 0;
   cursor: pointer;
   transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;

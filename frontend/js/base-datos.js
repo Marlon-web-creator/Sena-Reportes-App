@@ -54,6 +54,35 @@ function formatBytes(bytes) {
 }
 
 
+function extension(nombre) {
+  const n = String(nombre || "");
+  return n.includes(".")
+    ? n.split(".").pop().toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 4)
+    : "";
+}
+
+function iconoArchivo(nombre) {
+  const ext = extension(nombre);
+  return `<span class="archivo-icono ext-${ext || "otro"}">${ext || "—"}</span>`;
+}
+
+function celdaNombre(nombre) {
+  return `
+    <td class="col-nombre">
+      <div class="archivo-nombre">
+        ${iconoArchivo(nombre)}
+        <span class="archivo-texto">${esc(nombre)}</span>
+      </div>
+    </td>`;
+}
+
+function etiquetaModulo(modulo) {
+  return modulo
+    ? `<span class="badge">${esc(modulo)}</span>`
+    : '<span class="vacio">—</span>';
+}
+
+
 async function leerRespuesta(res) {
   const data = await res.json().catch(() => null);
 
@@ -507,7 +536,9 @@ async function cargarSubidos() {
 
     const tbody = document.getElementById("tabla-subidos");
 
-    tbody.innerHTML = data.map((f) => `
+    tbody.innerHTML = !data.length
+      ? `<tr><td colspan="6">Esta carpeta está vacía. Sube tu primer archivo arriba.</td></tr>`
+      : data.map((f) => `
       <tr>
         <td class="col-check">
           <input
@@ -517,33 +548,27 @@ async function cargarSubidos() {
             ${seleccionadosSubidos.has(f.id) ? "checked" : ""}
           />
         </td>
-        <td>${esc(f.nombre_original)}</td>
-        <td>${esc(f.modulo || "-")}</td>
+        ${celdaNombre(f.nombre_original)}
+        <td>${etiquetaModulo(f.modulo)}</td>
         <td>${formatBytes(f.tamano_bytes)}</td>
         <td>${esc(f.fecha_subida)}</td>
         <td>
-          <select class="select-mover-archivo" data-id="${f.id}" title="Mover a...">
-            ${opciones.map((o) => `
-              <option
-                value="${o.id}"
-                ${String(o.id) === String(f.carpeta_id ?? "") ? "selected" : ""}
-              >
-                ${esc(o.etiqueta)}
-              </option>
-            `).join("")}
-          </select>
+          <div class="acciones">
+            <select class="select-mover-archivo" data-id="${f.id}" title="Mover a...">
+              ${opciones.map((o) => `
+                <option
+                  value="${o.id}"
+                  ${String(o.id) === String(f.carpeta_id ?? "") ? "selected" : ""}
+                >
+                  ${esc(o.etiqueta)}
+                </option>
+              `).join("")}
+            </select>
 
-          <a href="${API}/subidos/${f.id}/descargar">
-            Descargar
-          </a>
+            <a class="btn-descargar" href="${API}/subidos/${f.id}/descargar">Descargar</a>
 
-          <button
-            type="button"
-            data-id="${f.id}"
-            class="btn-eliminar-subido"
-          >
-            Eliminar
-          </button>
+            <button type="button" data-id="${f.id}" class="btn-eliminar-subido">Eliminar</button>
+          </div>
         </td>
       </tr>
     `).join("");
@@ -676,7 +701,9 @@ async function cargarGenerados() {
 
     const tbody = document.getElementById("tabla-generados");
 
-    tbody.innerHTML = data.map((f) => {
+    tbody.innerHTML = !data.length
+      ? `<tr><td colspan="6">Todavía no hay archivos generados.</td></tr>`
+      : data.map((f) => {
       const claveFila = `${f.ejecucion_id}::${f.clave}`;
 
       return `
@@ -689,33 +716,28 @@ async function cargarGenerados() {
               ${seleccionadosGenerados.has(claveFila) ? "checked" : ""}
             />
           </td>
-          <td>${esc(f.modulo)}</td>
-          <td>${esc(f.nombre_archivo)}</td>
+          <td>${etiquetaModulo(f.modulo)}</td>
+          ${celdaNombre(f.nombre_archivo)}
           <td>${esc(f.fecha)}</td>
           <td>
-            ${f.existe ? "Disponible" : "No encontrado"}
+            <span class="estado ${f.existe ? "ok" : "falta"}">
+              ${f.existe ? "Disponible" : "No encontrado"}
+            </span>
           </td>
           <td>
-
-            ${
-              f.existe
-                ? `
-                  <a href="${API}/generados/${f.ejecucion_id}/${f.clave}/descargar">
-                    Descargar
-                  </a>
-                `
-                : ""
-            }
-
-            <button
-              type="button"
-              data-ejecucion="${f.ejecucion_id}"
-              data-clave="${esc(f.clave)}"
-              class="btn-eliminar-generado"
-            >
-              Eliminar
-            </button>
-
+            <div class="acciones">
+              ${f.existe
+                ? `<a class="btn-descargar" href="${API}/generados/${f.ejecucion_id}/${f.clave}/descargar">Descargar</a>`
+                : ""}
+              <button
+                type="button"
+                data-ejecucion="${f.ejecucion_id}"
+                data-clave="${esc(f.clave)}"
+                class="btn-eliminar-generado"
+              >
+                Eliminar
+              </button>
+            </div>
           </td>
         </tr>
       `;
