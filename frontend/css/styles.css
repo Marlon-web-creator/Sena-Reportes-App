@@ -990,3 +990,140 @@ a { color: var(--accent); }
   .panel { padding: 20px; }
   .db-panel.active { padding: 16px; }
 }
+
+/* ---------- 11. Animaciones ---------- */
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes slide-left {
+  from { opacity: 0; transform: translateX(-14px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-6px); }
+  40%, 80% { transform: translateX(6px); }
+}
+@keyframes stripes {
+  from { background-position: 0 0; }
+  to   { background-position: 28px 0; }
+}
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor; }
+  50%      { box-shadow: 0 0 0 5px transparent; }
+}
+@keyframes glow {
+  0%, 100% { box-shadow: 0 6px 18px rgba(57, 169, 0, 0.35); }
+  50%      { box-shadow: 0 6px 26px rgba(76, 196, 16, 0.6); }
+}
+@keyframes check-pop {
+  0%   { transform: rotate(45deg) scale(0); }
+  70%  { transform: rotate(45deg) scale(1.25); }
+  100% { transform: rotate(45deg) scale(1); }
+}
+
+/* ---------- Entrada de página ---------- */
+
+.topbar        { animation: fade 0.4s ease backwards; }
+.hero h2       { animation: slide-up 0.5s ease 0.05s backwards; }
+.hero p        { animation: slide-up 0.5s ease 0.15s backwards; }
+
+/* Tarjetas del inicio: aparecen en cascada */
+.dashboard .card { animation: slide-up 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) backwards; }
+.dashboard .card:nth-child(1) { animation-delay: 0.10s; }
+.dashboard .card:nth-child(2) { animation-delay: 0.18s; }
+.dashboard .card:nth-child(3) { animation-delay: 0.26s; }
+.dashboard .card:nth-child(4) { animation-delay: 0.34s; }
+.dashboard .card:nth-child(n+5) { animation-delay: 0.42s; }
+
+/* Paneles de los módulos (formulario y resultado) */
+.module-layout .panel { animation: slide-up 0.45s ease backwards; }
+.module-layout .panel:nth-child(2) { animation-delay: 0.08s; }
+.module-layout .panel:nth-child(3) { animation-delay: 0.16s; }
+
+/* Logo: brillo suave y continuo */
+.brand-mark { animation: glow 3.5s ease-in-out infinite; }
+
+/* ---------- Base de datos ---------- */
+
+/* Al cambiar de pestaña, el panel aparece con fundido */
+.db-panel.active { animation: slide-up 0.3s ease backwards; }
+
+/* Filas y carpetas: se animan solas cada vez que el JS las inserta */
+.db-table tbody tr { animation: slide-left 0.35s ease backwards; }
+.db-table tbody tr:nth-child(1)  { animation-delay: 0.00s; }
+.db-table tbody tr:nth-child(2)  { animation-delay: 0.04s; }
+.db-table tbody tr:nth-child(3)  { animation-delay: 0.08s; }
+.db-table tbody tr:nth-child(4)  { animation-delay: 0.12s; }
+.db-table tbody tr:nth-child(5)  { animation-delay: 0.16s; }
+.db-table tbody tr:nth-child(6)  { animation-delay: 0.20s; }
+.db-table tbody tr:nth-child(7)  { animation-delay: 0.24s; }
+.db-table tbody tr:nth-child(8)  { animation-delay: 0.28s; }
+.db-table tbody tr:nth-child(n+9) { animation-delay: 0.32s; }
+
+.carpeta-card { animation: pop 0.3s ease backwards; }
+.carpeta-card:nth-child(2) { animation-delay: 0.04s; }
+.carpeta-card:nth-child(3) { animation-delay: 0.08s; }
+.carpeta-card:nth-child(4) { animation-delay: 0.12s; }
+.carpeta-card:nth-child(n+5) { animation-delay: 0.16s; }
+
+/* Breadcrumb: el último tramo entra suavemente al navegar */
+.breadcrumb-item.activo { animation: fade 0.3s ease; }
+
+/* ---------- Resultados ---------- */
+
+.resultado > * { animation: slide-up 0.35s ease backwards; }
+
+.stat-box { animation: pop 0.4s ease backwards; }
+.stat-box:nth-child(1) { animation-delay: 0.05s; }
+.stat-box:nth-child(2) { animation-delay: 0.12s; }
+.stat-box:nth-child(3) { animation-delay: 0.19s; }
+.stat-box:nth-child(4) { animation-delay: 0.26s; }
+.stat-box:nth-child(n+5) { animation-delay: 0.33s; }
+
+.historial-item { animation: fade 0.3s ease backwards; }
+
+/* Barra de progreso: franjas en movimiento sobre el degradado */
+.barra-progreso {
+  background-image:
+    repeating-linear-gradient(
+      -45deg,
+      rgba(255, 255, 255, 0.16) 0 10px,
+      transparent 10px 20px
+    ),
+    linear-gradient(90deg, var(--accent-hover), var(--accent-bright));
+  background-size: 28px 100%, 100% 100%;
+  animation: stripes 0.8s linear infinite;
+}
+
+/* ---------- Estados y formularios ---------- */
+
+/* Punto "falta": late para llamar la atención */
+.estado.falta::before { animation: pulse-dot 1.8s ease-in-out infinite; }
+
+/* Checkbox: la marca "salta" al activarse */
+.field.checkbox input[type="checkbox"]:checked::after,
+.db-table .col-check input[type="checkbox"]:checked::after {
+  animation: check-pop 0.2s ease;
+}
+
+/* Error de login: aparece con sacudida */
+.login-error:not(:empty) { animation: shake 0.4s ease, fade 0.2s ease; }
+
+/* Botón de subir/ejecutar deshabilitado mientras procesa */
+.btn-primary:disabled,
+.login-submit:disabled { animation: pulse-opacity 1.2s ease-in-out infinite; }
+@keyframes pulse-opacity {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 0.7; }
+}
+
+/* Botones: micro-interacción al pasar el mouse */
+.btn-primary:hover,
+.login-submit:hover { transform: translateY(-1px); }
+.btn-primary,
+.login-submit { transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease; }
+.btn-primary:hover,
+.login-submit:hover { box-shadow: 0 6px 18px rgba(57, 169, 0, 0.3); }
