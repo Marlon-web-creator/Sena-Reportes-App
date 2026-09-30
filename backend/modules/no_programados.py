@@ -29,6 +29,7 @@ Ya no se usa PyMuPDF, pytesseract ni OCR.
 """
 
 import logging
+import math
 import os
 import re
 import time
@@ -39,7 +40,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import openpyxl
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter, range_boundaries
+from openpyxl.worksheet.table import TableColumn
 from rapidfuzz import fuzz
 
 # ============================================================
@@ -84,6 +87,27 @@ ENCABEZADO_ESTADO = "Estado Programación"
 ENCABEZADO_OBSERVACION = "Observación"
 ENCABEZADO_ARCHIVOS = "Archivo(s) BD"
 ENCABEZADO_DETALLE = "Detalle por RAP"
+
+# Las columnas de salida se definen UNA sola vez aquí: (clave, encabezado,
+# ancho en caracteres). Para agregar o quitar una columna basta tocar esta
+# lista; su posición no está fija: se ubican a continuación de la última
+# columna con encabezado de la tabla del Consolidado (detectada en cada
+# hoja) y heredan el estilo de la tabla (ver `aplicar_formato_salida`).
+COLUMNAS_SALIDA = (
+    ("estado", ENCABEZADO_ESTADO, 34),
+    ("observacion", ENCABEZADO_OBSERVACION, 40),
+    ("archivos", ENCABEZADO_ARCHIVOS, 28),
+    ("detalle", ENCABEZADO_DETALLE, 60),
+)
+_ENCABEZADOS_SALIDA_NORM = None  # se calcula tras definir normalizar_texto
+
+# Altura de fila: el texto extenso de las columnas nuevas se ajusta (wrap)
+# pero la fila NUNCA crece más de este número de líneas por culpa de ellas.
+# El texto completo sigue en la celda (se ve al seleccionarla) y por RAP en
+# la hoja "Reporte". Ajustable con NP_MAX_LINEAS_FILA.
+MAX_LINEAS_FILA = int(os.environ.get("NP_MAX_LINEAS_FILA") or 3)
+ALTO_LINEA_PT = 15.0
+ANCHO_DEFECTO_COL = 13
 
 # ============================================================
 # CONFIGURACIÓN — EXCELS DE LA BASE DE DATOS (export)
@@ -220,6 +244,7 @@ def clasificar_rap(evaluado: bool, programado: bool) -> str:
 
 
 _CASOS_NORMALIZADOS = {normalizar_texto(c): c for c in CASOS}
+_ENCABEZADOS_SALIDA_NORM = {normalizar_texto(enc) for _, enc, _ in COLUMNAS_SALIDA}
 
 
 # ============================================================
@@ -241,6 +266,7 @@ class ColumnasHoja:
         "fila_encabezado",
         "codigo", "competencia", "documento",
         "estado", "observacion", "archivos", "detalle",
+        "ultima_col_tabla", "col_estilo", "salida", "creadas",
     )
 
     def __repr__(self):
@@ -279,6 +305,29 @@ def _buscar_columna_por_texto_exacto(ws, fila_encabezado, texto_buscado, max_col
         if valor is not None and normalizar_texto(valor) == objetivo:
             return col
     return None
+
+
+def _ultima_col_con_encabezado(ws, fila_encabezado, max_col, excluir=frozenset()):
+    """Última columna cuyo encabezado tiene texto (ignora las columnas de salida)."""
+    ultima = 0
+    for col in range(1, max_col + 1):
+        valor = ws.cell(fila_encabezado, col).value
+        if valor is None or not str(valor).strip():
+            continue
+        if normalizar_texto(valor) in excluir:
+            continue
+        ultima = col
+    return ultima
+
+
+def _columna_vacia(ws, col, fila_desde):
+    """True si la columna no tiene ningún valor desde `fila_desde` hacia abajo."""
+    for (valor,) in ws.iter_rows(
+        min_row=fila_desde, max_row=ws.max_row, min_col=col, max_col=col, values_only=True
+    ):
+        if valor is not None and str(valor).strip() != "":
+            return False
+    return True
 
 
 def _localizar_fila_encabezado(ws, max_col):
@@ -331,23 +380,34 @@ def detectar_columnas(ws) -> ColumnasHoja:
             "de esa columna."
         )
 
-    siguiente_col_libre = max_col_original + 1
+    # Columnas de salida "procedurales": se ubican después de la última
+    # columna con encabezado de la tabla (no de ws.max_column, que puede
+    # incluir columnas vacías con formato), se reutilizan si ya existen
+    # (mismo encabezado) y nunca pisan una columna que tenga datos.
+    cols.ultima_col_tabla = _ultima_col_con_encabezado(
+        ws, fila_encabezado, max_col_original, excluir=_ENCABEZADOS_SALIDA_NORM
+    )
+    cols.col_estilo = cols.competencia   # columna de texto que se toma como modelo de estilo
+    cols.salida = {}
+    cols.creadas = set()
 
-    def _columna_salida(encabezado_texto):
-        nonlocal siguiente_col_libre
-        col = _buscar_columna_por_texto_exacto(
-            ws, fila_encabezado, encabezado_texto, max_col_original
-        )
-        if col is not None:
-            return col
-        col = siguiente_col_libre
-        siguiente_col_libre += 1
-        return col
+    usadas = set()
+    siguiente = cols.ultima_col_tabla + 1
+    for clave, encabezado, _ancho in COLUMNAS_SALIDA:
+        col = _buscar_columna_por_texto_exacto(ws, fila_encabezado, encabezado, max_col_original)
+        if col is None:
+            while siguiente in usadas or not _columna_vacia(ws, siguiente, fila_encabezado):
+                siguiente += 1
+            col = siguiente
+            siguiente += 1
+            cols.creadas.add(clave)
+        usadas.add(col)
+        cols.salida[clave] = col
 
-    cols.estado = _columna_salida(ENCABEZADO_ESTADO)
-    cols.observacion = _columna_salida(ENCABEZADO_OBSERVACION)
-    cols.archivos = _columna_salida(ENCABEZADO_ARCHIVOS)
-    cols.detalle = _columna_salida(ENCABEZADO_DETALLE)
+    cols.estado = cols.salida["estado"]
+    cols.observacion = cols.salida["observacion"]
+    cols.archivos = cols.salida["archivos"]
+    cols.detalle = cols.salida["detalle"]
 
     return cols
 
@@ -746,6 +806,113 @@ def analizar_ficha(ficha: str, filas_validas, base: BaseProgramacion) -> dict:
 
 
 # ============================================================
+# FORMATO DE LAS COLUMNAS DE SALIDA (hereda el diseño de la tabla)
+# ============================================================
+
+def _lineas_estimadas(texto, ancho) -> int:
+    """Líneas que ocupa `texto` con wrap en una columna de `ancho` caracteres."""
+    if texto is None:
+        return 1
+    por_linea = max(1, int((ancho or ANCHO_DEFECTO_COL) * 1.1))
+    return max(1, sum(
+        max(1, math.ceil(len(parrafo) / por_linea))
+        for parrafo in str(texto).split("\n")
+    ))
+
+
+def _copiar_estilo(origen, destino):
+    destino.font = copy(origen.font)
+    destino.fill = copy(origen.fill)
+    destino.border = copy(origen.border)
+    destino.protection = copy(origen.protection)
+    destino.number_format = "General"
+
+
+def _extender_tablas_y_filtros(ws, cols: "ColumnasHoja"):
+    """
+    Si el Consolidado usa una Tabla de Excel (ListObject) o un autofiltro que
+    llega hasta la última columna de la tabla, se extiende para incluir las
+    columnas de salida: así heredan estilo de tabla, bandas y filtros.
+    """
+    ultima_salida = max(cols.salida.values())
+    if ultima_salida <= cols.ultima_col_tabla:
+        return
+    letra = get_column_letter
+
+    for tabla in ws.tables.values():
+        c1, r1, c2, r2 = range_boundaries(tabla.ref)
+        if r1 != cols.fila_encabezado or c2 < cols.ultima_col_tabla or c2 >= ultima_salida:
+            continue
+        siguiente_id = max((tc.id for tc in tabla.tableColumns), default=0) + 1
+        for c in range(c2 + 1, ultima_salida + 1):
+            nombre = ws.cell(cols.fila_encabezado, c).value
+            nombre = str(nombre) if nombre not in (None, "") else f"Columna{c}"
+            tabla.tableColumns.append(TableColumn(id=siguiente_id, name=nombre))
+            siguiente_id += 1
+        tabla.ref = f"{letra(c1)}{r1}:{letra(ultima_salida)}{r2}"
+        if tabla.autoFilter is not None:
+            tabla.autoFilter.ref = tabla.ref
+
+    filtro = ws.auto_filter.ref
+    if filtro:
+        c1, r1, c2, r2 = range_boundaries(filtro)
+        if r1 == cols.fila_encabezado and cols.ultima_col_tabla <= c2 < ultima_salida:
+            ws.auto_filter.ref = f"{letra(c1)}{r1}:{letra(ultima_salida)}{r2}"
+
+
+def aplicar_formato_salida(ws, cols: "ColumnasHoja", ultima_fila: int):
+    """
+    Da a las columnas de salida el mismo diseño que la tabla del Consolidado
+    (fuente, relleno y bordes de la columna de competencia, fila por fila, así
+    se conservan las bandas) y controla el alto de fila:
+
+      * wrap de texto en las columnas nuevas, con ancho fijo;
+      * la fila crece como máximo MAX_LINEAS_FILA líneas por las columnas
+        nuevas (respetando lo que ya necesitaban las columnas originales).
+
+    Se llama DESPUÉS de reordenar, para que el alto corresponda al contenido
+    final de cada fila.
+    """
+    anchos = {clave: ancho for clave, _enc, ancho in COLUMNAS_SALIDA}
+
+    # Encabezado
+    ref_enc = ws.cell(cols.fila_encabezado, cols.col_estilo)
+    for clave, col in cols.salida.items():
+        celda = ws.cell(cols.fila_encabezado, col)
+        _copiar_estilo(ref_enc, celda)
+        celda.alignment = Alignment(
+            horizontal=ref_enc.alignment.horizontal,
+            vertical=ref_enc.alignment.vertical or "center",
+            wrap_text=True,
+        )
+        if clave in cols.creadas:
+            ws.column_dimensions[get_column_letter(col)].width = anchos[clave]
+
+    # Filas de datos
+    for fila in range(cols.fila_encabezado + 1, ultima_fila + 1):
+        ref = ws.cell(fila, cols.col_estilo)
+        lineas_nuevas = 1
+        for clave, col in cols.salida.items():
+            celda = ws.cell(fila, col)
+            _copiar_estilo(ref, celda)
+            celda.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            ancho = ws.column_dimensions[get_column_letter(col)].width or anchos[clave]
+            lineas_nuevas = max(lineas_nuevas, _lineas_estimadas(celda.value, ancho))
+
+        lineas_originales = 1
+        for c in range(1, cols.ultima_col_tabla + 1):
+            celda = ws.cell(fila, c)
+            if celda.alignment is not None and celda.alignment.wrap_text and isinstance(celda.value, str):
+                ancho = ws.column_dimensions[get_column_letter(c)].width
+                lineas_originales = max(lineas_originales, _lineas_estimadas(celda.value, ancho))
+
+        lineas = max(lineas_originales, min(lineas_nuevas, MAX_LINEAS_FILA))
+        if lineas > 1:
+            actual = ws.row_dimensions[fila].height or 0
+            ws.row_dimensions[fila].height = max(actual, lineas * ALTO_LINEA_PT)
+
+
+# ============================================================
 # REORDENAR FILAS + HOJA DE REPORTE
 # ============================================================
 
@@ -837,14 +1004,37 @@ def escribir_hoja_reporte(wb, datos_fichas, resultados_globales):
                     res["coincidencia"], res["observacion"], r["origen"],
                 ])
 
-    for fila in range(2, ws.max_row + 1):
-        for col in (4, 6, 8, 9, 11, 12):
-            ws.cell(fila, col).alignment = Alignment(wrap_text=True, vertical="top")
-
     anchos = {"A": 14, "B": 8, "C": 12, "D": 40, "E": 10, "F": 55, "G": 36,
               "H": 32, "I": 32, "J": 20, "K": 45, "L": 45}
     for columna, ancho in anchos.items():
         ws.column_dimensions[columna].width = ancho
+
+    # Encabezado con estilo propio, filtros y primera fila fija.
+    borde = Side(style="thin", color="808080")
+    for celda in ws[1]:
+        celda.font = Font(bold=True, color="FFFFFF")
+        celda.fill = PatternFill("solid", fgColor="1F4E78")
+        celda.border = Border(left=borde, right=borde, top=borde, bottom=borde)
+        celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+
+    # Texto con wrap, pero la fila no crece más de MAX_LINEAS_FILA líneas.
+    columnas_texto = (4, 6, 7, 8, 9, 11, 12)
+    for fila in range(2, ws.max_row + 1):
+        lineas = 1
+        for col in range(1, ws.max_column + 1):
+            celda = ws.cell(fila, col)
+            celda.border = Border(left=borde, right=borde, top=borde, bottom=borde)
+            if col in columnas_texto:
+                celda.alignment = Alignment(wrap_text=True, vertical="top")
+                ancho = anchos[get_column_letter(col)]
+                lineas = max(lineas, _lineas_estimadas(celda.value, ancho))
+            else:
+                celda.alignment = Alignment(vertical="top")
+        lineas = min(lineas, MAX_LINEAS_FILA)
+        if lineas > 1:
+            ws.row_dimensions[fila].height = lineas * ALTO_LINEA_PT
 
 
 # ============================================================
@@ -883,6 +1073,8 @@ def procesar(
     fichas_omitidas_estructura = []
     for ws in wb.worksheets:
         ficha = str(ws.title).strip()
+        if ficha.lower() == "reporte":
+            continue  # hoja generada por una ejecución anterior; se recrea al final
         try:
             cols = detectar_columnas(ws)
         except ColumnasNoDetectadas as e:
@@ -948,14 +1140,13 @@ def procesar(
             continue  # hoja omitida: se deja intacta
         resultados = resultados_globales.get(ficha, {})
 
-        ws.cell(cols.fila_encabezado, cols.estado).value = ENCABEZADO_ESTADO
-        ws.cell(cols.fila_encabezado, cols.observacion).value = ENCABEZADO_OBSERVACION
-        ws.cell(cols.fila_encabezado, cols.archivos).value = ENCABEZADO_ARCHIVOS
-        ws.cell(cols.fila_encabezado, cols.detalle).value = ENCABEZADO_DETALLE
+        for clave, encabezado, _ancho in COLUMNAS_SALIDA:
+            ws.cell(cols.fila_encabezado, cols.salida[clave]).value = encabezado
+        _extender_tablas_y_filtros(ws, cols)
 
         orden_por_fila = {}
         for fila in range(cols.fila_encabezado + 1, ws.max_row + 1):
-            for col in (cols.observacion, cols.archivos, cols.detalle):
+            for col in cols.salida.values():
                 ws.cell(fila, col).value = None
             res = resultados.get(fila)
             if res is None:
@@ -965,10 +1156,6 @@ def procesar(
             ws.cell(fila, cols.observacion).value = res["observacion"]
             ws.cell(fila, cols.archivos).value = "\n".join(res["archivos"]) or None
             ws.cell(fila, cols.detalle).value = "\n".join(res["detalle"]) or None
-            for col in (cols.estado, cols.observacion, cols.archivos, cols.detalle):
-                celda = ws.cell(fila, col)
-                if isinstance(celda.value, str) and "\n" in celda.value:
-                    celda.alignment = Alignment(wrap_text=True, vertical="top")
 
             orden_por_fila[fila] = res["orden"]
             total_filas += 1
@@ -986,6 +1173,9 @@ def procesar(
                     total_parcial += 1
 
         reordenar_filas_por_estado(ws, orden_por_fila, cols)
+        aplicar_formato_salida(
+            ws, cols, max(orden_por_fila, default=cols.fila_encabezado)
+        )
 
     _notificar(progress_callback, "Generando hoja de reporte…", total_fichas, total_fichas)
     escribir_hoja_reporte(wb, datos_fichas, resultados_globales)
