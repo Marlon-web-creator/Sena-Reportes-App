@@ -107,6 +107,8 @@ function renderResultado(idEjecucion, resultado) {
     total_solo_bd = 0,
     horas_titulada_reporte = 0,
     horas_grupos_bd = 0,
+    total_instructores_por_subir = 0,
+    total_horas_por_subir = 0,
     solo_reporte_por_vinculacion = {},
     archivos_bd_usados = [],
     archivos_bd_omitidos = [],
@@ -127,6 +129,8 @@ function renderResultado(idEjecucion, resultado) {
     stat(total_reporte_menor, "Reporte < BD"),
     stat(total_solo_reporte, "Solo en reporte"),
     stat(total_solo_bd, "Solo en BD"),
+    stat(total_instructores_por_subir, "Instructores a los que subir horas"),
+    stat(total_horas_por_subir, "Horas por subir"),
   ].join("");
 
   const nombreArchivo = archivo_generado.split(/[\\/]/).pop();

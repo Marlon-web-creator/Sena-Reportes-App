@@ -6,6 +6,14 @@ Instructor" (el archivo que se sube en cada ejecución) contra los Excels de
 horas programadas que están en la sección "Base de Datos" con módulo
 "Horas Instructores" (ej. HORAS_INSTRUCTORES_CONTRATISTA.xlsx, hoja "Export").
 
+Hay dos tipos de Excel de horas programadas en la BD:
+
+    CONTRATISTA  trae la columna "TIPOS DE HORAS AGRUPADAS" (HORAS ASOCIADAS A
+                 GRUPOS / INASISTENCIA / OTRAS HORAS).
+    PLANTA       (HORAS_INSTRUCTORES_PLANTA.xlsx) NO trae esa columna: cada fila
+                 es la programación de un grupo, así que todas sus horas se
+                 cuentan como "HORAS ASOCIADAS A GRUPOS".
+
 Qué se compara (por número de documento, para UN mes elegido):
 
     Reporte  : "Horas Formación Titulada Etapa Lectiva" (+ "Etapa Productiva"
@@ -18,6 +26,10 @@ y la formación complementaria, las horas adicionales y el total del reporte,
 NO entran en la diferencia: se muestran como columnas informativas.
 
 El reporte no trae el mes, por eso el mes se recibe como parámetro.
+
+Además de la diferencia, el Excel de salida indica para cada instructor la
+ACCIÓN a seguir y las HORAS POR SUBIR (lo que le falta al reporte para llegar a
+lo programado en la BD).
 
 Estados posibles por instructor:
     COINCIDE        horas iguales en ambos
@@ -70,9 +82,16 @@ _COLOR_ESTADO = {
 
 # Columnas requeridas (ya normalizadas, ver _normalizar)
 _REQ_REPORTE = ("NUMERO IDENTIFICACION", "HORAS FORMACION TITULADA ETAPA LECTIVA")
-_REQ_BD = (
-    "DOCUMENTO", "TIPOS DE HORAS AGRUPADAS", "MES PROGRAMADO", "TOTAL HORAS",
-)
+_REQ_BD = ("DOCUMENTO", "MES PROGRAMADO", "TOTAL HORAS")
+_COL_TIPO_BD = "TIPOS DE HORAS AGRUPADAS"  # opcional: los Excels de PLANTA no la traen
+_TIPO_POR_DEFECTO = "HORAS ASOCIADAS A GRUPOS"
+
+# Acciones (texto exacto que se escribe en el Excel)
+ACCION_OK = "OK"
+ACCION_SUBIR = "SUBIR HORAS"
+ACCION_SUBIR_TODAS = "SUBIR HORAS (no aparece en el reporte)"
+ACCION_REVISAR_EXCESO = "REVISAR: el reporte tiene más horas que la BD"
+ACCION_REVISAR_SOLO_REPORTE = "REVISAR: no tiene horas programadas en la BD"
 
 
 # ============================================================
@@ -136,6 +155,16 @@ def _num(x) -> float | int:
     """float entero -> int (para que el JSON y el Excel no muestren '176.0')."""
     x = float(x)
     return int(x) if x.is_integer() else round(x, 2)
+
+
+def _origen_archivo(nombre: str) -> str:
+    """PLANTA / CONTRATISTA según el nombre del Excel; vacío si no se reconoce."""
+    n = _normalizar(nombre)
+    if "PLANTA" in n:
+        return "PLANTA"
+    if "CONTRATISTA" in n or "CONTRATO" in n:
+        return "CONTRATISTA"
+    return ""
 
 
 def _detectar_encabezado(crudo: pd.DataFrame, requeridas: tuple, max_filas: int = 40):
@@ -237,7 +266,7 @@ def _leer_bd_archivo(ruta: Path, mes: int, omitidos: list[dict]):
         if fila is None:
             omitidos.append({
                 "archivo": ruta.name, "hoja": str(nombre_hoja),
-                "motivo": "no tiene las columnas DOCUMENTO / TIPOS DE HORAS AGRUPADAS / MES PROGRAMADO / TOTAL HORAS",
+                "motivo": "no tiene las columnas DOCUMENTO / MES PROGRAMADO / TOTAL HORAS",
             })
             continue
         alguna_valida = True
@@ -250,11 +279,17 @@ def _leer_bd_archivo(ruta: Path, mes: int, omitidos: list[dict]):
         df = pd.DataFrame({
             "doc": col("DOCUMENTO").map(_normalizar_documento),
             "nombre_bd": col("NOMBRE INSTRUCTOR"),
-            "tipo": col("TIPOS DE HORAS AGRUPADAS").map(_normalizar),
+            # Excels de PLANTA: sin columna de tipo -> todo son horas asociadas a grupos
+            "tipo": (
+                col(_COL_TIPO_BD).map(_normalizar)
+                if _COL_TIPO_BD in mapa
+                else pd.Series(_TIPO_POR_DEFECTO, index=datos.index)
+            ),
             "mes": col("MES PROGRAMADO").map(_numero_mes),
             "horas": col("TOTAL HORAS").map(_a_horas),
         })
-        # Descarta filas de "Total", pie de filtros y filas vacías (sin documento/tipo/mes)
+        # Descarta filas de "Total", pie de filtros y filas vacías (sin documento/tipo/mes);
+        # la fila "Total" y el pie de filtros no traen documento, por eso salen aquí.
         df = df[df["doc"].notna() & df["tipo"].ne("") & df["mes"].notna()]
         meses_encontrados |= set(int(m) for m in df["mes"].unique())
         df = df[df["mes"] == mes].copy()
@@ -324,6 +359,7 @@ def cargar_bd(carpeta_bd: Path, mes: int, progress_callback: ProgressCallback = 
         if not df.empty:
             df = df.copy()
             df["archivo"] = ruta.name
+            df["origen"] = _origen_archivo(ruta.name)
             por_archivo.append(df)
 
     info = {
@@ -334,7 +370,7 @@ def cargar_bd(carpeta_bd: Path, mes: int, progress_callback: ProgressCallback = 
         "documentos_en_varios_archivos": [],
     }
 
-    vacio = pd.DataFrame(columns=["doc", "nombre_bd", "grupos_bd", "inasistencia_bd", "otras_bd", "archivos_bd"])
+    vacio = pd.DataFrame(columns=["doc", "nombre_bd", "grupos_bd", "inasistencia_bd", "otras_bd", "archivos_bd", "origen_bd"])
     if not por_archivo:
         return vacio, info
 
@@ -350,6 +386,7 @@ def cargar_bd(carpeta_bd: Path, mes: int, progress_callback: ProgressCallback = 
         inasistencia_bd=("inasistencia_bd", "sum"),
         otras_bd=("otras_bd", "sum"),
         archivos_bd=("archivo", lambda s: ", ".join(sorted(set(s)))),
+        origen_bd=("origen", lambda s: ", ".join(sorted({x for x in s if x}))),
     )
     return agregado, info
 
@@ -364,6 +401,8 @@ def comparar(df_reporte: pd.DataFrame, df_bd: pd.DataFrame) -> pd.DataFrame:
     for c in ("titulada_reporte", "complementaria_reporte", "adicionales_reporte",
               "total_reporte", "grupos_bd", "inasistencia_bd", "otras_bd"):
         m[c] = m[c].astype(float)
+    if "origen_bd" not in m.columns:
+        m["origen_bd"] = None
 
     def estado(r):
         if r["_merge"] == "left_only":
@@ -379,6 +418,25 @@ def comparar(df_reporte: pd.DataFrame, df_bd: pd.DataFrame) -> pd.DataFrame:
     ambos = m["_merge"] == "both"
     m["diferencia"] = None
     m.loc[ambos, "diferencia"] = (m.loc[ambos, "titulada_reporte"] - m.loc[ambos, "grupos_bd"]).round(2)
+
+    # Qué hacer con cada instructor y cuántas horas le faltan al reporte
+    _acciones = {
+        COINCIDE: ACCION_OK,
+        REPORTE_MENOR: ACCION_SUBIR,
+        REPORTE_MAYOR: ACCION_REVISAR_EXCESO,
+        SOLO_REPORTE: ACCION_REVISAR_SOLO_REPORTE,
+        SOLO_BD: ACCION_SUBIR_TODAS,
+    }
+    m["accion"] = m["estado"].map(_acciones)
+
+    def _por_subir(r):
+        if r["estado"] == REPORTE_MENOR:
+            return round(-float(r["diferencia"]), 2)
+        if r["estado"] == SOLO_BD:
+            return round(float(r["grupos_bd"]), 2)
+        return 0.0
+
+    m["horas_por_subir"] = m.apply(_por_subir, axis=1)
 
     m["_orden"] = m["estado"].map(_ORDEN_ESTADOS)
     m["_abs"] = m["diferencia"].map(lambda x: abs(float(x)) if x is not None and pd.notna(x) else 0.0)
@@ -418,8 +476,9 @@ def _escribir_excel(df: pd.DataFrame, resumen_filas: list[tuple], ruta: Path) ->
     ws2 = wb.create_sheet("Comparativo")
     encabezados = [
         "DOCUMENTO", "NOMBRE (REPORTE)", "NOMBRE (BD)", "TIPO VINCULACIÓN",
+        "ORIGEN (BD)",
         "HORAS FORMACIÓN TITULADA (REPORTE)", "HORAS ASOCIADAS A GRUPOS (BD)",
-        "DIFERENCIA (REPORTE - BD)", "ESTADO",
+        "DIFERENCIA (REPORTE - BD)", "ESTADO", "HORAS POR SUBIR", "ACCIÓN",
         "HORAS INASISTENCIA (BD)", "OTRAS HORAS (BD)",
         "HORAS FORMACIÓN COMPLEMENTARIA (REPORTE)", "HORAS ADICIONALES (REPORTE)",
         "TOTAL HORAS INSTRUCTOR (REPORTE)", "ARCHIVO(S) BD",
@@ -444,10 +503,13 @@ def _escribir_excel(df: pd.DataFrame, resumen_filas: list[tuple], ruta: Path) ->
             _vacio(r["nombre_reporte"]),
             _vacio(r["nombre_bd"]),
             _vacio(r["vinculacion"]),
+            _vacio(r["origen_bd"]) or None,
             None if solo_bd else num(r["titulada_reporte"]),
             None if solo_rep else num(r["grupos_bd"]),
             num(r["diferencia"]),
             r["estado"],
+            num(r["horas_por_subir"]),
+            r["accion"],
             None if solo_rep else num(r["inasistencia_bd"]),
             None if solo_rep else num(r["otras_bd"]),
             None if solo_bd else num(r["complementaria_reporte"]),
@@ -459,11 +521,11 @@ def _escribir_excel(df: pd.DataFrame, resumen_filas: list[tuple], ruta: Path) ->
         color = PatternFill("solid", fgColor=_COLOR_ESTADO[r["estado"]])
         for c in ws2[ws2.max_row]:
             c.border = _BORDE
-        ws2.cell(row=ws2.max_row, column=8).fill = color
-        ws2.cell(row=ws2.max_row, column=7).fill = color
+        for col_color in (8, 9, 10, 11):  # diferencia, estado, horas por subir, acción
+            ws2.cell(row=ws2.max_row, column=col_color).fill = color
         ws2.cell(row=ws2.max_row, column=1).number_format = "@"
 
-    anchos = [15, 34, 34, 26, 18, 18, 16, 18, 14, 12, 20, 16, 18, 38]
+    anchos = [15, 34, 34, 26, 15, 18, 18, 16, 18, 14, 40, 14, 12, 20, 16, 18, 38]
     for i, a in enumerate(anchos, start=1):
         ws2.column_dimensions[get_column_letter(i)].width = a
     ws2.freeze_panes = "C2"
@@ -501,7 +563,7 @@ def procesar(
     if not info["archivos_usados"]:
         raise ValueError(
             "Ninguno de los Excels de la Base de Datos tiene la estructura esperada "
-            "(DOCUMENTO, TIPOS DE HORAS AGRUPADAS, MES PROGRAMADO, TOTAL HORAS)."
+            "(DOCUMENTO, MES PROGRAMADO, TOTAL HORAS)."
         )
     if df_bd.empty:
         disp = ", ".join(f"{n} ({MESES[n].capitalize()})" for n in info["meses_disponibles"]) or "ninguno"
@@ -520,6 +582,10 @@ def procesar(
         if not solo_rep.empty else {}
     )
 
+    por_subir = df[df["horas_por_subir"] > 0]
+    n_por_subir = int(len(por_subir))
+    horas_por_subir = _num(por_subir["horas_por_subir"].sum())
+
     horas_rep = _num(df_reporte["titulada_reporte"].sum())
     horas_bd = _num(df_bd["grupos_bd"].sum())
 
@@ -536,6 +602,8 @@ def procesar(
         "total_solo_bd": int(conteo.get(SOLO_BD, 0)),
         "horas_titulada_reporte": horas_rep,
         "horas_grupos_bd": horas_bd,
+        "total_instructores_por_subir": n_por_subir,
+        "total_horas_por_subir": horas_por_subir,
         "solo_reporte_por_vinculacion": {str(k): int(v) for k, v in por_vinc.items()},
         "archivos_bd_usados": info["archivos_usados"],
         "archivos_bd_omitidos": info["omitidos"],
@@ -562,6 +630,9 @@ def procesar(
         (REPORTE_MENOR, resultado["total_reporte_menor"]),
         (SOLO_REPORTE, resultado["total_solo_reporte"]),
         (SOLO_BD, resultado["total_solo_bd"]),
+        ("",),
+        ("Instructores a los que hay que subir horas", n_por_subir),
+        ("Total de horas por subir", horas_por_subir),
         ("",),
         ("Total horas formación titulada (todo el reporte)", horas_rep),
         ("Total horas asociadas a grupos (toda la BD del mes)", horas_bd),
