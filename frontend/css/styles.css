@@ -1672,3 +1672,65 @@ a { color: var(--accent); }
     justify-self: stretch;
   }
 }
+
+
+/* ---------- Ayuda por módulo (js/ayuda.js) ---------- */
+
+/* Botón "?" junto al título */
+.btn-ayuda {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.btn-ayuda:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent-bright);
+}
+.btn-ayuda:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+/* Modal de ayuda */
+.modal-ayuda {
+  max-width: 560px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.modal-ayuda .ayuda-cuerpo { margin-bottom: 20px; }
+.modal-ayuda .ayuda-cuerpo p { margin: 0 0 14px; }
+
+.modal-ayuda h4 {
+  margin: 16px 0 6px;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.modal-ayuda ol,
+.modal-ayuda ul {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+.modal-ayuda li { margin-bottom: 6px; }
+.modal-ayuda li::marker { color: var(--accent); }
