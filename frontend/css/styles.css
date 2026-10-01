@@ -1137,3 +1137,329 @@ a { color: var(--accent); }
   color: var(--text-dim);
   letter-spacing: 0.01em;
 }
+/* ---------- 12. Juicios posteriores a Etapa Práctica ----------
+   Pegar al final de styles.css.
+   Todo va acotado a body.juicios, así que no afecta a las demás pantallas.
+   Usa las variables de la sección 1 (--panel, --accent, --border, ...). */
+
+/* Respeta el atributo [hidden] aunque otra regla defina display */
+.juicios [hidden] { display: none !important; }
+
+/* Encabezado: enlace "Volver" con forma de botón secundario */
+.juicios .topbar > a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 0.87rem;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+.juicios .topbar > a:hover {
+  background: var(--panel-raised);
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-1px);
+}
+
+/* Contenedor y paneles */
+.juicios main {
+  display: grid;
+  gap: 18px;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 28px 24px 56px;
+}
+.juicios main > section {
+  min-width: 0;
+  padding: 26px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  animation: slide-up 0.45s ease backwards;
+}
+.juicios main > section:nth-child(2) { animation-delay: 0.08s; }
+
+.juicios main > section > h2 {
+  margin: 0 0 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  font-weight: 800;
+}
+.juicios main > section > p { margin: 0 0 18px; color: var(--text-dim); font-size: 0.9rem; }
+
+.juicios h3 {
+  margin: 26px 0 10px;
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 800;
+}
+.juicios h3 small {
+  margin-left: 8px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+/* Formulario */
+.juicios form { display: grid; gap: 16px; }
+.juicios form br { display: none; }
+.juicios form label[for] {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--text-dim);
+  font-size: 0.83rem;
+  font-weight: 500;
+}
+
+.juicios input[type="file"] {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 46px;
+  padding: 6px;
+  background: var(--bg-well);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+}
+.juicios input[type="file"]:hover { border-color: var(--border-strong); background: var(--panel-raised); }
+.juicios input[type="file"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.juicios input[type="file"]::file-selector-button {
+  height: 100%;
+  margin-right: 12px;
+  padding: 0 14px;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 8px;
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.juicios input[type="file"]::file-selector-button:hover { background: var(--accent-hover); }
+
+#lista-archivos {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.83rem;
+}
+#lista-archivos:empty { display: none; }
+
+/* Casilla "solo el día" (mismo estilo que .field.checkbox) */
+.juicios form label:has(input[type="checkbox"]) {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.87rem;
+  cursor: pointer;
+}
+.juicios input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 19px;
+  height: 19px;
+  margin: 0;
+  background: var(--bg-well);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.juicios input[type="checkbox"]:hover { border-color: var(--accent); background: var(--panel-raised); }
+.juicios input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+.juicios input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 2px;
+  width: 5px;
+  height: 10px;
+  border: solid var(--on-accent);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+  animation: check-pop 0.2s ease;
+}
+.juicios input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-dim); }
+
+/* Botón principal */
+#btn-ejecutar {
+  justify-self: start;
+  padding: 11px 24px;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+#btn-ejecutar:hover { background: var(--accent-hover); transform: translateY(-1px); box-shadow: 0 6px 18px rgba(57, 169, 0, 0.3); }
+#btn-ejecutar:active { transform: translateY(1px); }
+#btn-ejecutar:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; animation: pulse-opacity 1.2s ease-in-out infinite; }
+
+/* Estado (el JS pinta el color en errores) */
+#estado {
+  min-height: 1.4em;
+  margin: 14px 0 0;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+/* Resultado */
+#seccion-resultados > * { animation: slide-up 0.35s ease backwards; }
+
+#enlace-descarga {
+  display: inline-block;
+  padding: 10px 18px;
+  background: var(--green-dim);
+  color: var(--green);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 0.87rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color 0.15s ease;
+}
+#enlace-descarga:hover { border-color: var(--green); }
+
+/* Resumen general: cada <li> se ve como una caja de estadística (número arriba) */
+#resumen-general {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+#resumen-general li {
+  display: flex;
+  flex-direction: column-reverse;
+  padding: 14px 16px;
+  background: var(--bg-well);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  animation: pop 0.4s ease backwards;
+}
+#resumen-general li b {
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+#resumen-general li:nth-child(1) { animation-delay: 0.05s; }
+#resumen-general li:nth-child(2) { animation-delay: 0.12s; }
+#resumen-general li:nth-child(3) { animation-delay: 0.19s; }
+#resumen-general li:nth-child(4) { animation-delay: 0.26s; }
+#resumen-general li:nth-child(n+5) { animation-delay: 0.33s; }
+/* Resalta las dos cifras que importan */
+#resumen-general li:nth-child(5) { border-color: rgba(232, 169, 58, 0.45); background: var(--amber-dim); }
+#resumen-general li:nth-child(5) b { color: var(--amber); }
+
+/* Tablas (anulan border/cellpadding del HTML) */
+.juicios table {
+  width: 100%;
+  border: 0;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.juicios table th,
+.juicios table td {
+  padding: 10px;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+}
+.juicios table th {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.juicios table td { font-family: var(--font-mono); font-size: 0.83rem; }
+.juicios table tbody tr:last-child td { border-bottom: none; }
+.juicios table tbody tr:hover td { background: var(--panel-raised); }
+.juicios table td[colspan] { padding: 28px 10px; text-align: center; color: var(--text-faint); font-family: var(--font-body); font-style: italic; }
+
+/* Tablas anchas: scroll horizontal propio. Se activa si envuelves la
+   tabla en <div class="tabla-scroll">; si no, la sección ya hace overflow. */
+.tabla-scroll { overflow-x: auto; }
+#tabla-aprendices { min-width: 760px; }
+#seccion-resultados { overflow-x: auto; }
+
+/* Avisos */
+#bloque-advertencias,
+#bloque-sin-practica {
+  margin-top: 22px;
+  padding: 14px 18px;
+  border-radius: var(--radius-sm);
+}
+#bloque-advertencias { background: var(--amber-dim); border: 1px solid rgba(232, 169, 58, 0.3); }
+#bloque-sin-practica { background: var(--bg-well); border: 1px solid var(--border); }
+#bloque-advertencias h3,
+#bloque-sin-practica h3 { margin: 0 0 8px; font-size: 0.92rem; }
+#bloque-advertencias h3 { color: var(--amber); }
+#bloque-advertencias ul,
+#bloque-sin-practica ul { margin: 0; padding-left: 18px; color: var(--text-dim); font-size: 0.85rem; line-height: 1.6; }
+
+/* Detalle técnico plegable */
+.juicios details { margin-top: 24px; }
+.juicios summary {
+  display: inline-block;
+  padding: 6px 2px;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.juicios summary:hover { color: var(--accent); }
+#columnas-detectadas {
+  max-height: 320px;
+  margin: 10px 0 0;
+  padding: 14px 16px;
+  background: var(--bg-well);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  overflow: auto;
+}
+
+@media (max-width: 640px) {
+  .juicios main { padding: 20px 16px 48px; }
+  .juicios main > section { padding: 20px; }
+  #btn-ejecutar { justify-self: stretch; }
+}
