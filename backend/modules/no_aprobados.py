@@ -9,6 +9,7 @@ es exactamente la misma que en el script original.
 
 import re
 import unicodedata
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +26,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 FILA_FICHA = 2
 FILA_CODIGO = 3
 FILA_DENOMINACION = 5
+FILA_ESTADO_FICHA = 6
 FILA_FECHA_INICIO = 7
 FILA_FECHA_FIN = 8
 COL_VALOR_ENCABEZADO = 2
@@ -124,6 +126,65 @@ def formatear_ficha(valor) -> str:
     return str(valor).strip()
 
 
+def fecha_hoy() -> date:
+    """Fecha actual al momento de generar el consolidado (hora de Colombia si es posible)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/Bogota")).date()
+    except Exception:
+        return date.today()
+
+
+def a_fecha(valor) -> Optional[date]:
+    """Convierte lo que venga en la celda de fecha (datetime, texto dd/mm/yyyy) a date."""
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return None
+    if isinstance(valor, datetime):
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+    texto = str(valor).strip()
+    for formato in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(texto, formato).date()
+        except ValueError:
+            continue
+    return None
+
+
+def calcular_trimestre(fecha_inicio: Optional[date], hoy: date) -> str:
+    """
+    Trimestre en el que va la ficha a la fecha `hoy`: bloques de 3 meses
+    contados desde la Fecha Inicio (ej. inicio 05/11/2024 y hoy 01/10/2026 -> 8).
+    Si la ficha aún no empieza devuelve "AÚN NO INICIA"; sin fecha, "SIN FECHA".
+    """
+    if fecha_inicio is None:
+        return "SIN FECHA"
+    if hoy < fecha_inicio:
+        return "AÚN NO INICIA"
+    meses = (hoy.year - fecha_inicio.year) * 12 + (hoy.month - fecha_inicio.month)
+    if hoy.day < fecha_inicio.day:
+        meses -= 1
+    return str(meses // 3 + 1)
+
+
+def leer_estado_ficha(df: pd.DataFrame) -> str:
+    """
+    Lee 'Estado de la Ficha de Caracterización' buscando la etiqueta por texto
+    (columna A de las filas de cabecera); si no la encuentra usa FILA_ESTADO_FICHA.
+    """
+    for i in range(min(df.shape[0], 30)):
+        etiqueta = normalizar(df.iat[i, 0])
+        if etiqueta.startswith("ESTADO DE LA FICHA"):
+            valor = leer_valor_encabezado(df, i)
+            break
+    else:
+        valor = leer_valor_encabezado(df, FILA_ESTADO_FICHA)
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return "SIN ESTADO"
+    return str(valor).strip()
+
+
 def formatear_fecha(valor) -> str:
     if valor is None or (isinstance(valor, float) and pd.isna(valor)):
         return "SIN FECHA"
@@ -190,14 +251,18 @@ def resolver_indices_columnas(mapa_columnas: dict) -> tuple[list[int], int, int]
     return idx_columnas, idx_juicio, idx_estado
 
 
-def procesar_archivo(path: Path, valor_filtro: str) -> dict:
+def procesar_archivo(path: Path, valor_filtro: str, hoy: Optional[date] = None) -> dict:
+    hoy = hoy or fecha_hoy()
     engine = "xlrd" if path.suffix.lower() == ".xls" else "openpyxl"
     df = pd.read_excel(path, header=None, engine=engine)
 
     ficha = formatear_ficha(leer_valor_encabezado(df, FILA_FICHA))
     codigo = leer_valor_encabezado(df, FILA_CODIGO)
     denominacion = leer_valor_encabezado(df, FILA_DENOMINACION)
-    fecha_inicio = formatear_fecha(leer_valor_encabezado(df, FILA_FECHA_INICIO))
+    valor_fecha_inicio = leer_valor_encabezado(df, FILA_FECHA_INICIO)
+    fecha_inicio = formatear_fecha(valor_fecha_inicio)
+    estado_ficha = leer_estado_ficha(df)
+    trimestre = calcular_trimestre(a_fecha(valor_fecha_inicio), hoy)
     fecha_fin = formatear_fecha(leer_valor_encabezado(df, FILA_FECHA_FIN))
     denom_norm = normalizar(denominacion)
 
@@ -225,12 +290,14 @@ def procesar_archivo(path: Path, valor_filtro: str) -> dict:
     return {
         "ficha": ficha, "codigo": codigo, "denominacion": denominacion,
         "fecha_inicio": fecha_inicio, "fecha_fin": fecha_fin,
+        "estado_ficha": estado_ficha, "trimestre": trimestre,
         "siglas": siglas, "carpeta": carpeta, "filas": filas_salida,
     }
 
 
 def escribir_hoja(wb: Workbook, ficha: str, programa: str, filas: list, filtro: dict,
-                   fecha_inicio: str = "SIN FECHA", fecha_fin: str = "SIN FECHA"):
+                   fecha_inicio: str = "SIN FECHA", fecha_fin: str = "SIN FECHA",
+                   estado_ficha: str = "SIN ESTADO", trimestre: str = "SIN FECHA"):
     nombre_hoja = re.sub(r"[\[\]:\*\?/\\]", "_", ficha)[:31]
 
     nombre_original = nombre_hoja
@@ -254,6 +321,12 @@ def escribir_hoja(wb: Workbook, ficha: str, programa: str, filas: list, filtro: 
     ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=n_col)
     ws.cell(row=3, column=1,
             value=f"FECHA INICIO: {fecha_inicio}    FECHA FIN: {fecha_fin}").font = Font(bold=True, size=11)
+
+    # Fila 4 (antes vacía): la tabla sigue empezando en la fila 5, así que
+    # los scripts que leen el consolidado por posición no se ven afectados.
+    ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=n_col)
+    ws.cell(row=4, column=1,
+            value=f"ESTADO DE LA FICHA: {estado_ficha}    TRIMESTRE: {trimestre}").font = Font(bold=True, size=11)
 
     for c in range(1, n_col + 1):
         ws.column_dimensions[get_column_letter(c)].width = 22
@@ -304,6 +377,8 @@ def consolidar(
 
     salida_dir.mkdir(parents=True, exist_ok=True)
 
+    hoy = fecha_hoy()  # misma fecha para todas las hojas del consolidado
+
     libros = {"RAMOS": Workbook(), "GELVES": Workbook()}
     for wb in libros.values():
         wb.remove(wb.active)
@@ -323,7 +398,7 @@ def consolidar(
 
     for path in archivos:
         try:
-            r = procesar_archivo(path, filtro["valor"])
+            r = procesar_archivo(path, filtro["valor"], hoy)
         except Exception as e:
             stats["errores"].append({"archivo": path.name, "error": str(e)})
             continue
@@ -337,6 +412,7 @@ def consolidar(
         escribir_hoja(
             libros[r["carpeta"]], r["ficha"], r["denominacion"], r["filas"], filtro,
             fecha_inicio=r["fecha_inicio"], fecha_fin=r["fecha_fin"],
+            estado_ficha=r["estado_ficha"], trimestre=r["trimestre"],
         )
         stats["fichas"][r["carpeta"]] += 1
         stats["coincidencias"][r["carpeta"]] += len(r["filas"])
@@ -348,6 +424,7 @@ def consolidar(
             escribir_hoja(
                 wb_general, r["ficha"], r["denominacion"], r["filas"], filtro,
                 fecha_inicio=r["fecha_inicio"], fecha_fin=r["fecha_fin"],
+                estado_ficha=r["estado_ficha"], trimestre=r["trimestre"],
             )
 
     sufijo = filtro["sufijo"]
