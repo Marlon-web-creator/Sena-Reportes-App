@@ -111,18 +111,18 @@ async def ejecutar_juicios_practica(
 async def descargar_resultado(id_ejecucion: str, nombre_archivo: str):
     """
     Redirige a una URL firmada temporal de Supabase Storage.
-    Asume la convención de rutas usada en _subir_generado():
-    generados/<modulo>/<id_ejecucion>/<nombre_archivo>
+    Igual que en archivos_router._redirigir_a_url_firmada: NO se
+    pre-valida con existe_archivo() para evitar falsos negativos;
+    si crear_url_firmada() no devuelve URL, entonces sí es 404.
     """
     ruta_storage = f"generados/{NOMBRE_MODULO}/{id_ejecucion}/{nombre_archivo}"
 
-    if not supabase_storage.existe_archivo(ruta_storage):
-        raise HTTPException(status_code=404, detail="Archivo no encontrado.")
-
-    url = supabase_storage.crear_url_firmada(ruta_storage, nombre_descarga=nombre_archivo)
+    url = supabase_storage.crear_url_firmada(
+        ruta_storage, nombre_descarga=nombre_archivo
+    )
 
     if not url:
-        raise HTTPException(status_code=500, detail="No se pudo generar el enlace de descarga.")
+        raise HTTPException(status_code=404, detail="Archivo no encontrado.")
 
     return RedirectResponse(url)
 
