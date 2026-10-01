@@ -358,10 +358,19 @@ a { color: var(--accent); }
 }
 .card:focus-visible { outline-offset: 3px; border-radius: var(--radius-lg); }
 
-.tone-green { --tint: #4cc410; --tint-dim: rgba(76, 196, 16, 0.16); }
-.tone-teal  { --tint: #2fb5ad; --tint-dim: rgba(47, 181, 173, 0.16); }
-.tone-amber { --tint: #e8a93a; --tint-dim: rgba(232, 169, 58, 0.16); }
-.tone-coral { --tint: #ef7f73; --tint-dim: rgba(239, 127, 115, 0.16); }
+.tone-green  { --tint: #4cc410; --tint-dim: rgba(76, 196, 16, 0.16); }
+.tone-teal   { --tint: #2fb5ad; --tint-dim: rgba(47, 181, 173, 0.16); }
+.tone-amber  { --tint: #e8a93a; --tint-dim: rgba(232, 169, 58, 0.16); }
+.tone-coral  { --tint: #ef7f73; --tint-dim: rgba(239, 127, 115, 0.16); }
+.tone-blue   { --tint: #4b8fe8; --tint-dim: rgba(75, 143, 232, 0.16); }
+.tone-purple { --tint: #8b6bd9; --tint-dim: rgba(139, 107, 217, 0.16); }
+.tone-pink   { --tint: #df6fa9; --tint-dim: rgba(223, 111, 169, 0.16); }
+.tone-indigo { --tint: #6574d9; --tint-dim: rgba(101, 116, 217, 0.16); }
+.tone-cyan   { --tint: #38afd1; --tint-dim: rgba(56, 175, 209, 0.16); }
+.tone-lime   { --tint: #91bd35; --tint-dim: rgba(145, 189, 53, 0.16); }
+.tone-orange { --tint: #e98942; --tint-dim: rgba(233, 137, 66, 0.16); }
+.tone-slate  { --tint: #718096; --tint-dim: rgba(113, 128, 150, 0.16); }
+
 
 .card-icon {
   display: grid;
