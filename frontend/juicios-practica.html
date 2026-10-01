@@ -3,49 +3,37 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
     <title>Juicios posteriores a Etapa Práctica - SENA Nexus</title>
+
     <link
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.css"
     />
+
     <link rel="stylesheet" href="css/styles.css" />
   </head>
-  <body class="juicios">
-    <!-- ============ ENCABEZADO ============ -->
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-            <path d="M14 2v6h6" />
-            <path d="m9 15 2 2 4-4" />
-          </svg>
-        </div>
-        <div class="topbar-text">
-          <h1>Juicios posteriores a Etapa Práctica</h1>
-          <p class="subtitle">
-            Detecta juicios lectivos APROBADOS con fecha posterior a la
-            aprobación de "2 - RESULTADOS DE APRENDIZAJE ETAPA PRACTICA".
-          </p>
-        </div>
-      </div>
 
-      <a href="index.html">← Volver al inicio</a>
+  <body class="juicios">
+    <header class="topbar">
+      <a class="back-link" href="index.html">&larr; Volver</a>
+      <h1>Juicios posteriores a Etapa Práctica</h1>
     </header>
 
-    <main>
+    <main class="module-layout">
       <!-- ============ FORMULARIO ============ -->
-      <section id="seccion-formulario">
-        <h2>1. Sube los reportes</h2>
+      <section id="seccion-formulario" class="panel">
+        <h2>1. Configuración</h2>
+
         <p>
-          Sube uno o varios "Reporte de Juicios de Evaluación" (uno por ficha).
-          Las columnas se detectan solas.
+          Sube uno o varios "Reporte de Juicios de Evaluación"
+          (uno por ficha). Las columnas se detectan automáticamente.
         </p>
 
         <form id="form-juicios">
-          <div>
-            <label for="reportes">Reportes (.xls, .xlsx, .xlsm):</label>
+          <label class="field">
+            <span>Reportes (.xls, .xlsx, .xlsm):</span>
+
             <input
               type="file"
               id="reportes"
@@ -54,89 +42,116 @@
               multiple
               required
             />
-            <ul id="lista-archivos"></ul>
-          </div>
+          </label>
 
-          <div>
-            <label>
+          <div id="lista-archivos" class="file-list"></div>
+
+          <label class="field">
+            <span>
               <input type="checkbox" id="solo-fecha" />
               Comparar solo el día (ignorar la hora)
-            </label>
-          </div>
+            </span>
+          </label>
 
-          <button type="submit" id="btn-ejecutar">Verificar juicios</button>
+          <button type="submit" id="btn-ejecutar" class="btn-primary">
+            Verificar juicios
+          </button>
         </form>
 
-        <p id="estado" role="status"></p>
+        <div id="estado" class="progreso oculto" role="status"></div>
       </section>
 
       <!-- ============ RESULTADOS ============ -->
-      <section id="seccion-resultados" hidden>
+      <section id="seccion-resultados" class="panel" hidden>
         <h2>2. Resultado</h2>
 
-        <p>
-          <a id="enlace-descarga" href="#">Descargar Excel generado</a>
-        </p>
+        <div class="resultado">
+          <p>
+            <a
+              id="enlace-descarga"
+              href="#"
+              class="btn-primary"
+            >
+              Descargar Excel generado
+            </a>
+          </p>
 
-        <h3>Resumen</h3>
-        <ul id="resumen-general"></ul>
+          <h3>Resumen</h3>
+          <ul id="resumen-general"></ul>
 
-        <h3>Resumen por ficha</h3>
-        <div class="tabla-scroll">
-          <table id="tabla-fichas">
-            <thead>
-              <tr>
-                <th>Ficha</th>
-                <th>Aprendices</th>
-                <th>Con práctica aprobada</th>
-                <th>Con inconsistencia</th>
-                <th>Juicios posteriores</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+          <h3>Resumen por ficha</h3>
+
+          <div class="tabla-scroll">
+            <table id="tabla-fichas">
+              <thead>
+                <tr>
+                  <th>Ficha</th>
+                  <th>Aprendices</th>
+                  <th>Con práctica aprobada</th>
+                  <th>Con inconsistencia</th>
+                  <th>Juicios posteriores</th>
+                </tr>
+              </thead>
+
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <h3>
+            Aprendices a revisar
+            <small id="nota-limite"></small>
+          </h3>
+
+          <div class="tabla-scroll">
+            <table id="tabla-aprendices">
+              <thead>
+                <tr>
+                  <th>Ficha</th>
+                  <th>Documento</th>
+                  <th>Nombre</th>
+                  <th>Estado</th>
+                  <th>Fecha aprobación práctica</th>
+                  <th># Juicios posteriores</th>
+                  <th>Último juicio posterior</th>
+                </tr>
+              </thead>
+
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div id="bloque-sin-practica" hidden>
+            <h3>Fichas sin ningún aprendiz con práctica aprobada</h3>
+            <ul id="lista-sin-practica"></ul>
+          </div>
+
+          <div id="bloque-advertencias" hidden>
+            <h3>Advertencias</h3>
+            <ul id="lista-advertencias"></ul>
+          </div>
+
+          <details>
+            <summary>Columnas detectadas por archivo</summary>
+            <pre id="columnas-detectadas"></pre>
+          </details>
         </div>
-
-        <h3>Aprendices a revisar <small id="nota-limite"></small></h3>
-        <div class="tabla-scroll">
-          <table id="tabla-aprendices">
-            <thead>
-              <tr>
-                <th>Ficha</th>
-                <th>Documento</th>
-                <th>Nombre</th>
-                <th>Estado</th>
-                <th>Fecha aprobación práctica</th>
-                <th># Juicios posteriores</th>
-                <th>Último juicio posterior</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-
-        <div id="bloque-sin-practica" hidden>
-          <h3>Fichas sin ningún aprendiz con práctica aprobada</h3>
-          <ul id="lista-sin-practica"></ul>
-        </div>
-
-        <div id="bloque-advertencias" hidden>
-          <h3>Advertencias</h3>
-          <ul id="lista-advertencias"></ul>
-        </div>
-
-        <details>
-          <summary>Columnas detectadas por archivo</summary>
-          <pre id="columnas-detectadas"></pre>
-        </details>
       </section>
     </main>
 
     <footer class="site-footer">
-      <p>SENA Nexus · Juicios posteriores a Etapa Práctica</p>
+      <p>
+        © <span id="footer-year">2026</span> SENA Nexus. Centro de Diseño y
+        Metrologia - Marlon Diaz. Todos los derechos reservados.
+      </p>
+
+      <script>
+        document.getElementById("footer-year").textContent =
+          new Date().getFullYear();
+      </script>
     </footer>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.js"></script>
+    <script src="js/toasts.js"></script>
     <script src="js/api.js"></script>
     <script src="js/juicios-practica.js"></script>
   </body>
