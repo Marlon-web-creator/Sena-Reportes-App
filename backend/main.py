@@ -20,6 +20,7 @@ from routers import (
     no_programados_router,
     correo_router,
     juicios_practica_router,
+    horas_instructores_router,
     archivos_router,
 )
 
@@ -36,6 +37,7 @@ app.include_router(depuracion_router.router)
 app.include_router(no_programados_router.router)
 app.include_router(correo_router.router)
 app.include_router(juicios_practica_router.router)
+app.include_router(horas_instructores_router.router)
 app.include_router(archivos_router.router)
 
 print(">>> RUTAS ARCHIVOS REGISTRADAS:")

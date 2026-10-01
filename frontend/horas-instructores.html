@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Comparador de Horas Instructores</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.css"
+    />
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="back-link" href="index.html">&larr; Volver</a>
+      <h1>Comparador de Horas Instructores</h1>
+    </header>
+
+    <main class="module-layout">
+      <section class="panel">
+        <h2>1. Configuración</h2>
+
+        <label class="field">
+          <span>Mes a comparar</span>
+          <select id="mes">
+            <option value="">Selecciona el mes…</option>
+            <option value="1">1. Enero</option>
+            <option value="2">2. Febrero</option>
+            <option value="3">3. Marzo</option>
+            <option value="4">4. Abril</option>
+            <option value="5">5. Mayo</option>
+            <option value="6">6. Junio</option>
+            <option value="7">7. Julio</option>
+            <option value="8">8. Agosto</option>
+            <option value="9">9. Septiembre</option>
+            <option value="10">10. Octubre</option>
+            <option value="11">11. Noviembre</option>
+            <option value="12">12. Diciembre</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>"Reporte Ejecución Horas Instructor" a cargar</span>
+          <input type="file" id="reporte" accept=".xls,.xlsx,.xlsm" />
+        </label>
+
+        <p class="field folder-hint">
+          Carga el reporte que quieres revisar. El sistema detectará
+          automáticamente los archivos que estén en la
+          <strong>Base de Datos</strong> con el módulo
+          <strong>"Horas Instructores"</strong> (por ejemplo, HORAS INSTRUCTORES
+          CONTRATISTA). Si falta alguno, súbelo primero desde esa sección. (Si
+          no tienes acceso a la Base de Datos, contacta al administrador del
+          sistema).
+        </p>
+
+        <div id="resumenSeleccion" class="file-list"></div>
+
+        <button id="btnProcesar" class="btn-primary">Comparar</button>
+
+        <div id="bloqueProgreso" class="oculto">
+          <div class="barra-progreso-contenedor">
+            <div id="barraProgreso" class="barra-progreso"></div>
+          </div>
+          <div id="mensajeProgreso" class="progreso-mensaje">Iniciando…</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>2. Resultado</h2>
+        <div id="resultado" class="resultado">
+          <p class="placeholder">
+            Aquí aparecerán las estadísticas y el archivo generado.
+          </p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>3. Historial reciente</h2>
+        <div id="historial" class="historial"></div>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <p>
+        © <span id="footer-year">2026</span> SENA Nexus. Centro de Diseño y
+        Metrologia - Marlon Diaz. Todos los derechos reservados.
+      </p>
+      <script>
+        document.getElementById("footer-year").textContent =
+          new Date().getFullYear();
+      </script>
+    </footer>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.js"></script>
+    <script src="js/toasts.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/horas-instructores.js"></script>
+    <script src="js/ayuda.js"></script>
+  </body>
+</html>

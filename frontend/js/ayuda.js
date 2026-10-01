@@ -87,6 +87,24 @@ const AYUDA_MODULOS = {
       "Al final del resultado, «Columnas detectadas por archivo» sirve para comprobar que el sistema leyó bien cada reporte.",
     ],
   },
+
+  "horas-instructores.html": {
+    titulo: "Comparador de Horas Instructores",
+    resumen:
+      "Compara las horas de formación titulada de cada instructor en el «Reporte Ejecución Horas Instructor» contra las horas asociadas a grupos de los archivos de la Base de Datos, para el mes que elijas.",
+    pasos: [
+      "Verifica primero que el Excel de horas (ej. HORAS INSTRUCTORES CONTRATISTA) esté cargado en la sección «Base de Datos» con el módulo «Horas Instructores».",
+      "Elige el «Mes a comparar». El reporte no indica a qué mes corresponde, por eso hay que escogerlo.",
+      "Selecciona el «Reporte Ejecución Horas Instructor» (.xls, .xlsx o .xlsm).",
+      "Pulsa «Comparar» y sigue la barra de progreso hasta que termine.",
+    ],
+    resultado:
+      "En «2. Resultado» verás las estadísticas y el Excel para descargar, con una fila por instructor y su estado: COINCIDE, REPORTE > BD, REPORTE < BD, SOLO EN REPORTE o SOLO EN BD. Queda registrado en el historial.",
+    notas: [
+      "El sistema detecta automáticamente los archivos de la Base de Datos; no hay que adjuntarlos aquí.",
+      "La formación complementaria, las horas adicionales y las horas de inasistencia u otras horas de la BD se muestran en el Excel pero no entran en la diferencia.",
+    ],
+  },
 };
 
 (function () {
