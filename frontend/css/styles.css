@@ -1,12 +1,5 @@
 @import url("https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap");
 
-/* ============================================================
-   SENA Reportes — hoja de estilos única
-   Índice: 1 Variables · 2 Base · 3 Componentes compartidos
-           4 Encabezado · 5 Inicio · 6 Módulos · 7 Base de datos
-           8 Modal · 9 Login · 10 Responsive
-   ============================================================ */
-
 /* ---------- 1. Variables ---------- */
 
 :root {

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Juicios posteriores a Etapa Práctica - SENA Nexus</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.css"
+    />
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="topbar-text">
+          <h1>Juicios posteriores a Etapa Práctica</h1>
+          <p class="subtitle">
+            Detecta juicios lectivos APROBADOS con fecha posterior a la
+            aprobación de "2 - RESULTADOS DE APRENDIZAJE ETAPA PRACTICA".
+          </p>
+        </div>
+      </div>
+      <a href="index.html">← Volver al inicio</a>
+    </header>
+
+    <main>
+      <!-- ============ FORMULARIO ============ -->
+      <section id="seccion-formulario">
+        <h2>1. Sube los reportes</h2>
+        <p>
+          Sube uno o varios "Reporte de Juicios de Evaluación" (uno por ficha).
+          Las columnas se detectan solas.
+        </p>
+
+        <form id="form-juicios">
+          <div>
+            <label for="reportes">Reportes (.xls, .xlsx, .xlsm):</label><br />
+            <input
+              type="file"
+              id="reportes"
+              name="reportes"
+              accept=".xls,.xlsx,.xlsm"
+              multiple
+              required
+            />
+            <ul id="lista-archivos"></ul>
+          </div>
+
+          <div>
+            <label>
+              <input type="checkbox" id="solo-fecha" />
+              Comparar solo el día (ignorar la hora)
+            </label>
+          </div>
+
+          <button type="submit" id="btn-ejecutar">Verificar juicios</button>
+        </form>
+
+        <p id="estado" role="status"></p>
+      </section>
+
+      <!-- ============ RESULTADOS ============ -->
+      <section id="seccion-resultados" hidden>
+        <h2>2. Resultado</h2>
+
+        <p>
+          <a id="enlace-descarga" href="#">Descargar Excel generado</a>
+        </p>
+
+        <h3>Resumen</h3>
+        <ul id="resumen-general"></ul>
+
+        <h3>Resumen por ficha</h3>
+        <table id="tabla-fichas" border="1" cellpadding="4">
+          <thead>
+            <tr>
+              <th>Ficha</th>
+              <th>Aprendices</th>
+              <th>Con práctica aprobada</th>
+              <th>Con inconsistencia</th>
+              <th>Juicios posteriores</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+
+        <h3>Aprendices a revisar <small id="nota-limite"></small></h3>
+        <table id="tabla-aprendices" border="1" cellpadding="4">
+          <thead>
+            <tr>
+              <th>Ficha</th>
+              <th>Documento</th>
+              <th>Nombre</th>
+              <th>Estado</th>
+              <th>Fecha aprobación práctica</th>
+              <th># Juicios posteriores</th>
+              <th>Último juicio posterior</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+
+        <div id="bloque-sin-practica" hidden>
+          <h3>Fichas sin ningún aprendiz con práctica aprobada</h3>
+          <ul id="lista-sin-practica"></ul>
+        </div>
+
+        <div id="bloque-advertencias" hidden>
+          <h3>Advertencias</h3>
+          <ul id="lista-advertencias"></ul>
+        </div>
+
+        <details>
+          <summary>Columnas detectadas por archivo</summary>
+          <pre id="columnas-detectadas"></pre>
+        </details>
+      </section>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/juicios-practica.js"></script>
+  </body>
+</html>
