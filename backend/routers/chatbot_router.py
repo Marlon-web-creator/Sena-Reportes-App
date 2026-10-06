@@ -4,16 +4,24 @@ routers/chatbot_router.py
 Endpoints del chatbot. Responde SOLO con base en los archivos de la
 Base de Datos con modulo = "documentacion".
 
+- POST /api/chatbot/preguntar : ABIERTO (como los demás módulos), con
+  límite de preguntas por IP.
+- GET  /api/chatbot/documentos: PROTEGIDO (diagnóstico, requiere la
+  sesión de Base de Datos).
+
 Usa cualquier API compatible con OpenAI (Groq, Gemini, OpenRouter...).
 
 Variables de entorno:
 - CHATBOT_API_KEY (obligatoria): clave del proveedor.
 - CHATBOT_API_URL: base de la API. Por defecto Groq.
-- CHATBOT_MODELO: modelo principal. Por defecto llama-3.3-70b-versatile.
+- CHATBOT_MODELO: modelo principal.
 - CHATBOT_MODELO_RESPALDO (opcional): modelo a usar si el principal da
-  429 (límite) o error del servidor.
-- CHATBOT_MAX_TOKENS (opcional, 600), CHATBOT_FRAGMENTOS (opcional, 4),
-  CHATBOT_TIMEOUT (opcional, 60 segundos).
+  404, 429 (límite) o error del servidor.
+- CHATBOT_REASONING_EFFORT (opcional): "low", "medium" o "high" para
+  modelos que razonan (gpt-oss). Si el modelo no lo soporta, no la definas.
+- CHATBOT_MAX_TOKENS (opcional, 1200), CHATBOT_FRAGMENTOS (opcional, 4),
+  CHATBOT_TIMEOUT (opcional, 60 segundos),
+  CHATBOT_MAX_POR_MINUTO (opcional, 6 preguntas por IP).
 """
 
 import logging
@@ -35,7 +43,7 @@ router = APIRouter(prefix="/api/chatbot", tags=["Chatbot"])
 
 API_URL = (os.environ.get("CHATBOT_API_URL") or "https://api.groq.com/openai/v1").rstrip("/")
 API_KEY = os.environ.get("CHATBOT_API_KEY") or ""
-MODELO = os.environ.get("CHATBOT_MODELO") or "llama-3.3-70b-versatile"
+MODELO = os.environ.get("CHATBOT_MODELO") or "openai/gpt-oss-120b"
 MODELO_RESPALDO = os.environ.get("CHATBOT_MODELO_RESPALDO") or ""
 MAX_TOKENS_RESPUESTA = int(os.environ.get("CHATBOT_MAX_TOKENS") or 1200)
 REASONING_EFFORT = os.environ.get("CHATBOT_REASONING_EFFORT") or ""
@@ -100,7 +108,8 @@ def _llamar_modelo(modelo: str, mensajes: list[dict]) -> str:
         "temperature": 0.2,
     }
     if REASONING_EFFORT:
-        cuerpo["reasoning_effort"] = REASONING_EFFORT  
+        cuerpo["reasoning_effort"] = REASONING_EFFORT
+
     try:
         resp = _get_http().post(
             f"{API_URL}/chat/completions",
@@ -141,8 +150,8 @@ def _responder(mensajes: list[dict]) -> str:
                 break
             logger.info("Modelo %s falló (%s). Probando respaldo si existe.", modelo, e.status)
 
-    # Nota: nunca devolvemos 401/403 al navegador (el frontend los
-    # interpreta como "sesión vencida"), por eso los clave inválida van como 500.
+    # Nota: nunca devolvemos 401/403 al navegador (el widget los
+    # interpreta como "sesión vencida"), por eso la clave inválida va como 500.
     if ultimo.status == 429:
         raise HTTPException(
             status_code=429,
@@ -205,10 +214,12 @@ def _limitar_por_ip(request: Request) -> None:
         )
     _peticiones[ip].append(ahora)
 
+
 # ============================================================
 # ENDPOINTS
 # ============================================================
 
+# PROTEGIDO: solo diagnóstico (requiere la sesión de Base de Datos).
 @router.get("/documentos", dependencies=[Depends(requiere_auth)])
 def documentos_disponibles():
     """Diagnóstico: qué archivos está leyendo el chatbot ahora mismo."""
@@ -226,10 +237,13 @@ def documentos_disponibles():
     }
 
 
+# ABIERTO (sin requiere_auth): lo usa el widget desde cualquier módulo.
 # Endpoint síncrono (def): FastAPI lo corre en un hilo, así la descarga
 # y la llamada al modelo no bloquean el resto de la app.
-@router.post("/preguntar", dependencies=[Depends(requiere_auth)])
-def preguntar(datos: PreguntaIn):
+@router.post("/preguntar")
+def preguntar(datos: PreguntaIn, request: Request):
+    _limitar_por_ip(request)
+
     if not API_KEY:
         raise HTTPException(
             status_code=500,
