@@ -37,7 +37,8 @@ API_URL = (os.environ.get("CHATBOT_API_URL") or "https://api.groq.com/openai/v1"
 API_KEY = os.environ.get("CHATBOT_API_KEY") or ""
 MODELO = os.environ.get("CHATBOT_MODELO") or "llama-3.3-70b-versatile"
 MODELO_RESPALDO = os.environ.get("CHATBOT_MODELO_RESPALDO") or ""
-MAX_TOKENS_RESPUESTA = int(os.environ.get("CHATBOT_MAX_TOKENS") or 600)
+MAX_TOKENS_RESPUESTA = int(os.environ.get("CHATBOT_MAX_TOKENS") or 1200)
+REASONING_EFFORT = os.environ.get("CHATBOT_REASONING_EFFORT") or ""
 FRAGMENTOS_POR_PREGUNTA = int(os.environ.get("CHATBOT_FRAGMENTOS") or 4)
 TIMEOUT_SEGUNDOS = float(os.environ.get("CHATBOT_TIMEOUT") or 60)
 MAX_MENSAJES_HISTORIAL = 6
@@ -98,6 +99,8 @@ def _llamar_modelo(modelo: str, mensajes: list[dict]) -> str:
         "max_tokens": MAX_TOKENS_RESPUESTA,
         "temperature": 0.2,
     }
+    if REASONING_EFFORT:
+        cuerpo["reasoning_effort"] = REASONING_EFFORT  
     try:
         resp = _get_http().post(
             f"{API_URL}/chat/completions",
@@ -134,7 +137,7 @@ def _responder(mensajes: list[dict]) -> str:
             ultimo = _ErrorModelo(502, "vacía")
         except _ErrorModelo as e:
             ultimo = e
-            if e.status not in (429, 500, 502, 503, 504):
+            if e.status not in (404, 429, 500, 502, 503, 504):
                 break
             logger.info("Modelo %s falló (%s). Probando respaldo si existe.", modelo, e.status)
 
