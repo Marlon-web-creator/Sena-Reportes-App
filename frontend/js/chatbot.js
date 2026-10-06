@@ -246,7 +246,10 @@
     raiz.id = "cb-root";
     raiz.innerHTML =
       '<button class="cb-boton" type="button" aria-label="Abrir asistente" aria-expanded="false">' +
+      '  <span class="cb-boton-icono">' +
       icono("chat") +
+      "</span>" +
+      '  <span class="cb-boton-texto">Asistente</span>' +
       "</button>" +
       '<section class="cb-panel" role="dialog" aria-label="Asistente de documentación" hidden>' +
       '  <header class="cb-encabezado">' +
