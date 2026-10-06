@@ -15,6 +15,25 @@
   var BIENVENIDA =
     "Hola, soy el asistente de la documentación. Hazme una pregunta sobre los archivos cargados.";
 
+  // Íconos vectoriales: mismo estilo que el index (trazo 1.8, extremos redondeados).
+  var ICONOS = {
+    chat:
+      '<path d="M20 11.5a7.5 7.5 0 0 1-10.9 6.7L4 19.5l1.3-4.4A7.5 7.5 0 1 1 20 11.5z" />' +
+      '<path d="M9 10.5h6M9 14h3.5" />',
+    nuevo: '<path d="M20 11a8 8 0 1 0-2.3 5.7" /><path d="M20 4v7h-7" />',
+    cerrar: '<path d="M6 6l12 12M18 6 6 18" />',
+    enviar: '<path d="M21 3 10 14" /><path d="M21 3l-7 18-4-7-7-4 18-7z" />',
+  };
+
+  function icono(nombre) {
+    return (
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+      'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      ICONOS[nombre] +
+      "</svg>"
+    );
+  }
+
   // Si tu login usa un token en header (en vez de cookie de sesión),
   // devuélvelo aquí. Ej: return { Authorization: "Bearer " + localStorage.getItem("token") };
   function cabecerasAuth() {
@@ -226,19 +245,27 @@
     raiz = document.createElement("div");
     raiz.id = "cb-root";
     raiz.innerHTML =
-      '<button class="cb-boton" type="button" aria-label="Abrir asistente" aria-expanded="false">💬</button>' +
+      '<button class="cb-boton" type="button" aria-label="Abrir asistente" aria-expanded="false">' +
+      icono("chat") +
+      "</button>" +
       '<section class="cb-panel" role="dialog" aria-label="Asistente de documentación" hidden>' +
       '  <header class="cb-encabezado">' +
       '    <span class="cb-titulo">Asistente</span>' +
       '    <div class="cb-acciones">' +
-      '      <button class="cb-limpiar" type="button" title="Nueva conversación" aria-label="Nueva conversación">↺</button>' +
-      '      <button class="cb-cerrar" type="button" title="Cerrar" aria-label="Cerrar asistente">✕</button>' +
+      '      <button class="cb-limpiar" type="button" title="Nueva conversación" aria-label="Nueva conversación">' +
+      icono("nuevo") +
+      "</button>" +
+      '      <button class="cb-cerrar" type="button" title="Cerrar" aria-label="Cerrar asistente">' +
+      icono("cerrar") +
+      "</button>" +
       "    </div>" +
       "  </header>" +
       '  <div class="cb-mensajes" aria-live="polite"></div>' +
       '  <div class="cb-entrada-caja">' +
       '    <textarea class="cb-entrada" rows="1" maxlength="2000" placeholder="Escribe tu pregunta…" aria-label="Pregunta"></textarea>' +
-      '    <button class="cb-enviar" type="button">Enviar</button>' +
+      '    <button class="cb-enviar" type="button">Enviar ' +
+      icono("enviar") +
+      "</button>" +
       "  </div>" +
       "</section>";
     document.body.appendChild(raiz);
