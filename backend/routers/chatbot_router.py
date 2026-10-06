@@ -19,9 +19,11 @@ Variables de entorno:
 import logging
 import os
 import threading
+from collections import defaultdict
+from time import time
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from auth.security import requiere_auth
@@ -174,6 +176,31 @@ def _armar_mensajes(pregunta: str, historial: list[Mensaje], fragmentos: list[di
     previos.append({"role": "user", "content": f"{contexto}\n\nPregunta: {pregunta}"})
     return previos
 
+
+# ============================================================
+# LÍMITE DE PREGUNTAS POR IP (protege el cupo gratuito del modelo)
+# ============================================================
+
+MAX_PREGUNTAS_POR_MINUTO = int(os.environ.get("CHATBOT_MAX_POR_MINUTO") or 6)
+VENTANA_SEGUNDOS = 60
+_peticiones: dict[str, list[float]] = defaultdict(list)
+
+
+def _limitar_por_ip(request: Request) -> None:
+    # En Render estamos detrás de proxy: la IP real viene en X-Forwarded-For.
+    ip = (
+        request.headers.get("x-forwarded-for", request.client.host or "?")
+        .split(",")[0]
+        .strip()
+    )
+    ahora = time()
+    _peticiones[ip] = [t for t in _peticiones[ip] if ahora - t < VENTANA_SEGUNDOS]
+    if len(_peticiones[ip]) >= MAX_PREGUNTAS_POR_MINUTO:
+        raise HTTPException(
+            status_code=429,
+            detail="Demasiadas preguntas seguidas. Espera un momento e intenta de nuevo.",
+        )
+    _peticiones[ip].append(ahora)
 
 # ============================================================
 # ENDPOINTS
