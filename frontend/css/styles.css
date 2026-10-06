@@ -55,6 +55,7 @@
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
   font-family: var(--font-body);
   font-size: 15px;
   line-height: 1.5;
@@ -69,6 +70,7 @@ body {
 
 ::selection { background: var(--accent-dim); color: var(--text); }
 a { color: var(--accent); }
+img, svg { max-width: 100%; }
 
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -78,15 +80,12 @@ a { color: var(--accent); }
 
 .oculto { display: none; }
 
+/* Respeta el atributo [hidden] aunque otra regla defina display */
+.juicios [hidden] { display: none !important; }
+
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
-
-@keyframes pop {
-  from { opacity: 0; transform: translateY(8px) scale(0.98); }
-  to   { opacity: 1; transform: none; }
-}
-@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* ---------- 3. Componentes compartidos ---------- */
 
@@ -94,6 +93,7 @@ a { color: var(--accent); }
 .field select,
 .field input[type="file"],
 .field input[type="number"],
+.juicios input[type="file"],
 .upload-form input[type="file"],
 .upload-form input[type="text"],
 .modal-input,
@@ -111,6 +111,7 @@ a { color: var(--accent); }
 .field select:hover,
 .field input[type="file"]:hover,
 .field input[type="number"]:hover,
+.juicios input[type="file"]:hover,
 .upload-form input:hover,
 .modal-input:hover,
 .password-input:hover,
@@ -121,6 +122,7 @@ a { color: var(--accent); }
 .field select:focus,
 .field input[type="file"]:focus,
 .field input[type="number"]:focus,
+.juicios input[type="file"]:focus,
 .upload-form input:focus,
 .modal-input:focus,
 .password-input:focus,
@@ -148,7 +150,8 @@ a { color: var(--accent); }
 
 /* Botón interno de los input file */
 .field input[type="file"]::file-selector-button,
-.upload-form input[type="file"]::file-selector-button {
+.upload-form input[type="file"]::file-selector-button,
+.juicios input[type="file"]::file-selector-button {
   height: 100%;
   margin-right: 12px;
   padding: 0 14px;
@@ -163,13 +166,15 @@ a { color: var(--accent); }
   transition: background 0.15s ease;
 }
 .field input[type="file"]::file-selector-button:hover,
-.upload-form input[type="file"]::file-selector-button:hover { background: var(--accent-hover); }
+.upload-form input[type="file"]::file-selector-button:hover,
+.juicios input[type="file"]::file-selector-button:hover { background: var(--accent-hover); }
 
 /* Botón principal (verde) */
 .btn-primary,
 .login-submit,
 .upload-form button,
-.modal-btn-confirm {
+.modal-btn-confirm,
+#btn-ejecutar {
   background: var(--accent);
   color: var(--on-accent);
   border: none;
@@ -178,18 +183,40 @@ a { color: var(--accent); }
   font-size: 0.9rem;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s ease, transform 0.1s ease;
+  transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
+.btn-primary,
+#btn-ejecutar { padding: 11px 22px; }
+
 .btn-primary:hover,
 .login-submit:hover,
 .upload-form button:hover,
-.modal-btn-confirm:hover { background: var(--accent-hover); }
+.modal-btn-confirm:hover,
+#btn-ejecutar:hover { background: var(--accent-hover); }
+
+/* Micro-interacción: elevación al pasar el mouse */
+.btn-primary:hover,
+.login-submit:hover,
+#btn-ejecutar:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(57, 169, 0, 0.3);
+}
+
 .btn-primary:active,
 .login-submit:active,
-.upload-form button:active { transform: translateY(1px); }
+.upload-form button:active,
+#btn-ejecutar:active { transform: translateY(1px); }
+
+/* Deshabilitado: va al final para ganar sobre :hover y :active */
 .btn-primary:disabled,
-.login-submit:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
-.btn-primary { padding: 11px 22px; }
+.login-submit:disabled,
+#btn-ejecutar:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+  animation: pulse-opacity 1.2s ease-in-out infinite;
+}
 
 /* Botón secundario (contorno) */
 .btn-database,
@@ -250,14 +277,142 @@ a { color: var(--accent); }
 .db-table button:hover { background: transparent; border-color: var(--red); }
 .db-tab-danger:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
 
+/* Enlaces de descarga (verde suave) */
+.descargas a,
+#enlace-descarga,
+.btn-descargar {
+  background: var(--green-dim);
+  color: var(--green);
+  border: 1px solid transparent;
+  font-weight: 600;
+  text-decoration: none;
+  transition: border-color 0.15s ease;
+}
+.descargas a:hover,
+#enlace-descarga:hover,
+.btn-descargar:hover { border-color: var(--green); }
+.descargas a,
+#enlace-descarga { padding: 9px 16px; border-radius: var(--radius-sm); font-size: 0.85rem; }
+#enlace-descarga { display: inline-block; }
+.btn-descargar {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 13px;
+  border-radius: 8px;
+  font-size: 0.78rem;
+}
+
 /* Contenedores */
 .panel,
 .db-panel.active,
 .modal,
-.login-card {
+.login-card,
+.juicios main > section {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+}
+
+/* Etiqueta de campo */
+.field > span,
+.juicios form label[for] {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--text-dim);
+  font-size: 0.83rem;
+  font-weight: 500;
+}
+
+/* Casilla de verificación (formularios) */
+.field.checkbox input[type="checkbox"],
+.juicios input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 19px;
+  height: 19px;
+  margin: 0;
+  background: var(--bg-well);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.field.checkbox input[type="checkbox"]:hover,
+.juicios input[type="checkbox"]:hover { border-color: var(--accent); background: var(--panel-raised); }
+.field.checkbox input[type="checkbox"]:checked,
+.juicios input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+.field.checkbox input[type="checkbox"]:checked::after,
+.juicios input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 2px;
+  width: 5px;
+  height: 10px;
+  border: solid var(--on-accent);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.field.checkbox input[type="checkbox"]:focus-visible,
+.juicios input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-dim); }
+
+/* Listas de archivos seleccionados y mensajes de estado en monoespaciada */
+.file-list,
+#lista-archivos,
+.upload-lista-seleccionados,
+.progreso,
+#estado {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+
+/* Tablas de resultados (fichas y juicios) */
+.tabla-fichas,
+.juicios table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.tabla-fichas th,
+.tabla-fichas td,
+.juicios table th,
+.juicios table td {
+  padding: 10px;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+}
+.tabla-fichas th,
+.juicios table th { color: var(--text-dim); font-size: 0.78rem; font-weight: 600; }
+.tabla-fichas td,
+.juicios table td { font-family: var(--font-mono); font-size: 0.83rem; }
+.tabla-fichas tr:last-child td,
+.juicios table tbody tr:last-child td { border-bottom: none; }
+.tabla-fichas tr:hover td,
+.juicios table tbody tr:hover td { background: var(--panel-raised); }
+
+/* Tarjetas de estadística (resultados y resumen de juicios) */
+.stat-grid,
+#resumen-general {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+.stat-box,
+#resumen-general li {
+  padding: 14px 16px;
+  background: var(--bg-well);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.stat-box .valor,
+#resumen-general li b {
+  color: var(--text);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- 4. Encabezado ---------- */
@@ -330,7 +485,7 @@ a { color: var(--accent); }
 
 .dashboard {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
   gap: 18px;
   max-width: 1100px;
   margin: 28px auto 56px;
@@ -370,7 +525,6 @@ a { color: var(--accent); }
 .tone-lime   { --tint: #91bd35; --tint-dim: rgba(145, 189, 53, 0.16); }
 .tone-orange { --tint: #e98942; --tint-dim: rgba(233, 137, 66, 0.16); }
 .tone-slate  { --tint: #718096; --tint-dim: rgba(113, 128, 150, 0.16); }
-
 
 .card-icon {
   display: grid;
@@ -422,7 +576,8 @@ a { color: var(--accent); }
 
 /* ---------- 6. Módulos (formulario + resultado) ---------- */
 
-.module-layout {
+.module-layout,
+.juicios main {
   display: grid;
   gap: 18px;
   max-width: 780px;
@@ -430,8 +585,11 @@ a { color: var(--accent); }
   padding: 28px 24px 56px;
 }
 
-.panel { padding: 26px; }
-.panel h2 {
+.panel,
+.juicios main > section { min-width: 0; padding: 26px; }
+
+.panel h2,
+.juicios main > section > h2 {
   margin: 0 0 18px;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--border);
@@ -442,48 +600,22 @@ a { color: var(--accent); }
 
 .field { display: block; margin-bottom: 16px; }
 .field:last-child { margin-bottom: 0; }
-.field > span { display: block; margin-bottom: 7px; color: var(--text-dim); font-size: 0.83rem; font-weight: 500; }
 
 .field select,
 .field input[type="file"],
-.field input[type="number"] { width: 100%; height: 46px; padding: 9px 12px; }
-.field input[type="file"] { display: flex; align-items: center; padding: 6px; }
+.field input[type="number"],
+.juicios input[type="file"] { width: 100%; height: 46px; padding: 9px 12px; }
+.field input[type="file"],
+.juicios input[type="file"] { display: flex; align-items: center; padding: 6px; }
 
 .field.folder-hint { margin: -10px 0 16px; color: var(--text-dim); font-size: 0.78rem; }
 
 .field.checkbox { display: flex; align-items: center; gap: 9px; }
 .field.checkbox > span { margin: 0; }
-.field.checkbox input[type="checkbox"] {
-  appearance: none;
-  -webkit-appearance: none;
-  position: relative;
-  width: 19px;
-  height: 19px;
-  margin: 0;
-  background: var(--bg-well);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
-}
-.field.checkbox input[type="checkbox"]:hover { border-color: var(--accent); background: var(--panel-raised); }
-.field.checkbox input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
-.field.checkbox input[type="checkbox"]:checked::after {
-  content: "";
-  position: absolute;
-  left: 6px;
-  top: 2px;
-  width: 5px;
-  height: 10px;
-  border: solid var(--on-accent);
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg);
-}
-.field.checkbox input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-dim); }
 
-.file-list { margin-bottom: 16px; color: var(--text-dim); font-family: var(--font-mono); font-size: 0.83rem; }
+.file-list { margin-bottom: 16px; font-size: 0.83rem; }
 
-.progreso { margin-top: 12px; color: var(--text-dim); font-family: var(--font-mono); font-size: 0.85rem; }
+.progreso { margin-top: 12px; font-size: 0.85rem; }
 .progreso-mensaje { margin-top: 8px; color: var(--text-dim); font-size: 0.85rem; }
 .barra-progreso-contenedor {
   height: 10px;
@@ -496,52 +628,30 @@ a { color: var(--accent); }
 .barra-progreso {
   width: 0;
   height: 100%;
-  background: linear-gradient(90deg, var(--accent-hover), var(--accent-bright));
+  background-image:
+    repeating-linear-gradient(
+      -45deg,
+      rgba(255, 255, 255, 0.16) 0 10px,
+      transparent 10px 20px
+    ),
+    linear-gradient(90deg, var(--accent-hover), var(--accent-bright));
+  background-size: 28px 100%, 100% 100%;
   transition: width 0.3s ease;
 }
 
 .resultado .placeholder { color: var(--text-faint); font-size: 0.9rem; font-style: italic; }
 
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 10px;
-  margin: 16px 0;
-}
-.stat-box { padding: 14px 16px; background: var(--bg-well); border: 1px solid var(--border); border-radius: var(--radius-sm); }
-.stat-box .valor {
-  display: block;
-  font-family: var(--font-display);
-  font-size: 1.6rem;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-}
+.stat-grid { margin: 16px 0; }
+.stat-box .valor { display: block; font-size: 1.6rem; }
 .stat-box .etiqueta { display: block; margin-top: 2px; color: var(--text-dim); font-size: 0.78rem; }
 
 .descargas { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
-.descargas a {
-  padding: 9px 16px;
-  background: var(--green-dim);
-  color: var(--green);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  font-size: 0.85rem;
-  font-weight: 600;
-  text-decoration: none;
-  transition: border-color 0.15s ease;
-}
-.descargas a:hover { border-color: var(--green); }
 
-.tabla-fichas { width: 100%; margin-top: 16px; border-collapse: collapse; font-size: 0.85rem; }
-.tabla-fichas th,
-.tabla-fichas td { padding: 10px; text-align: left; border-bottom: 1px solid var(--border); }
-.tabla-fichas th { color: var(--text-dim); font-size: 0.78rem; font-weight: 600; }
-.tabla-fichas td { font-family: var(--font-mono); font-size: 0.83rem; }
-.tabla-fichas tr:last-child td { border-bottom: none; }
-.tabla-fichas tr:hover td { background: var(--panel-raised); }
+.tabla-fichas { margin-top: 16px; }
 
 .historial-item {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
   padding: 12px 0;
@@ -567,9 +677,11 @@ a { color: var(--accent); }
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .db-tab {
   appearance: none;
+  flex-shrink: 0;
   padding: 9px 18px;
   background: transparent;
   border: none;
@@ -586,12 +698,12 @@ a { color: var(--accent); }
 .db-tab.active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
 
 /* Botones de eliminar: "seleccionados" empuja ambos a la derecha */
-.db-tab-danger { padding: 9px 16px; font-size: 0.85rem; white-space: nowrap; }
+.db-tab-danger { flex-shrink: 0; padding: 9px 16px; font-size: 0.85rem; white-space: nowrap; }
 #btn-eliminar-seleccionados { margin-left: auto; }
 
 /* Paneles */
 .db-panel { display: none; }
-.db-panel.active { display: block; padding: 22px 24px; overflow-x: auto; }
+.db-panel.active { display: block; padding: 22px 24px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
 /* Formulario de subida: zona punteada */
 .upload-form {
@@ -609,17 +721,13 @@ a { color: var(--accent); }
 .upload-form input[type="file"],
 .upload-form input[type="text"] { height: 44px; padding: 0 12px; font-size: 0.87rem; background-color: var(--panel); }
 .upload-form input[type="text"] { flex: 1 1 180px; }
-.upload-form input[type="file"] { flex: 1 1 240px; display: flex; align-items: center; padding: 5px 6px; cursor: pointer; }
+.upload-form input[type="file"] { flex: 1 1 240px; display: flex; align-items: center; padding: 5px 6px; }
+.upload-form input[type="file"],
+.juicios input[type="file"] { cursor: pointer; }
 .upload-form button { height: 44px; padding: 0 22px; font-size: 0.87rem; }
 
 /* Lista de archivos elegidos antes de subir */
-.upload-lista-seleccionados {
-  margin-bottom: 18px;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  line-height: 1.7;
-}
+.upload-lista-seleccionados { margin-bottom: 18px; font-size: 0.8rem; line-height: 1.7; }
 .upload-lista-seleccionados:empty { display: none; }
 
 /* ---------- Tabla: cada fila es una "tarjeta" ---------- */
@@ -718,20 +826,6 @@ a { color: var(--accent); }
 .acciones { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .acciones .select-mover-archivo { max-width: 170px; }
 .db-table button { margin-left: 0; padding: 6px 13px; font-size: 0.78rem; font-weight: 600; }
-.btn-descargar {
-  display: inline-flex;
-  align-items: center;
-  padding: 6px 13px;
-  background: var(--green-dim);
-  color: var(--green);
-  border: 1px solid transparent;
-  border-radius: 8px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  text-decoration: none;
-  transition: border-color 0.15s ease;
-}
-.btn-descargar:hover { border-color: var(--green); }
 
 /* Checkbox de selección */
 .db-table .col-check { width: 44px; padding-right: 4px; text-align: center; }
@@ -816,7 +910,7 @@ a { color: var(--accent); }
 
 .db-carpetas-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr));
   gap: 10px;
   margin-bottom: 22px;
 }
@@ -888,16 +982,17 @@ a { color: var(--accent); }
   background: rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(3px);
   -webkit-backdrop-filter: blur(3px);
-  animation: fade 0.15s ease;
 }
 .modal {
   width: 100%;
   max-width: 440px;
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
   padding: 26px 28px 22px;
   border-color: var(--border-strong);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-pop);
-  animation: pop 0.15s ease;
+  overflow-y: auto;
 }
 .modal h3 { margin: 0 0 10px; font-family: var(--font-display); font-size: 1.15rem; font-weight: 800; }
 .modal p { margin: 0 0 22px; color: var(--text-dim); font-size: 0.9rem; line-height: 1.55; }
@@ -923,6 +1018,7 @@ a { color: var(--accent); }
 
 .login-page {
   min-height: calc(100vh - 80px);
+  min-height: calc(100dvh - 80px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -934,7 +1030,6 @@ a { color: var(--accent); }
   padding: 34px 32px 30px;
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-pop);
-  animation: pop 0.2s ease;
 }
 .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
 .login-brand svg { width: 26px; height: 26px; color: var(--accent); flex-shrink: 0; }
@@ -980,157 +1075,7 @@ a { color: var(--accent); }
   text-align: left;
 }
 
-/* ---------- 10. Responsive ---------- */
-
-@media (max-width: 640px) {
-  .topbar { padding: 20px 16px 6px; }
-  .hero { padding: 32px 16px 6px; }
-  .dashboard { grid-template-columns: 1fr; padding: 0 16px; }
-  .card { padding: 22px; }
-  .module-layout,
-  .db-page { padding: 20px 16px 48px; }
-  .panel { padding: 20px; }
-  .db-panel.active { padding: 16px; }
-}
-
-/* ---------- 11. Animaciones ---------- */
-
-@keyframes slide-up {
-  from { opacity: 0; transform: translateY(18px); }
-  to   { opacity: 1; transform: none; }
-}
-@keyframes slide-left {
-  from { opacity: 0; transform: translateX(-14px); }
-  to   { opacity: 1; transform: none; }
-}
-@keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  20%, 60% { transform: translateX(-6px); }
-  40%, 80% { transform: translateX(6px); }
-}
-@keyframes stripes {
-  from { background-position: 0 0; }
-  to   { background-position: 28px 0; }
-}
-@keyframes pulse-dot {
-  0%, 100% { box-shadow: 0 0 0 0 currentColor; }
-  50%      { box-shadow: 0 0 0 5px transparent; }
-}
-@keyframes glow {
-  0%, 100% { box-shadow: 0 6px 18px rgba(57, 169, 0, 0.35); }
-  50%      { box-shadow: 0 6px 26px rgba(76, 196, 16, 0.6); }
-}
-@keyframes check-pop {
-  0%   { transform: rotate(45deg) scale(0); }
-  70%  { transform: rotate(45deg) scale(1.25); }
-  100% { transform: rotate(45deg) scale(1); }
-}
-
-/* ---------- Entrada de página ---------- */
-
-.topbar        { animation: fade 0.4s ease backwards; }
-.hero h2       { animation: slide-up 0.5s ease 0.05s backwards; }
-.hero p        { animation: slide-up 0.5s ease 0.15s backwards; }
-
-/* Tarjetas del inicio: aparecen en cascada */
-.dashboard .card { animation: slide-up 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) backwards; }
-.dashboard .card:nth-child(1) { animation-delay: 0.10s; }
-.dashboard .card:nth-child(2) { animation-delay: 0.18s; }
-.dashboard .card:nth-child(3) { animation-delay: 0.26s; }
-.dashboard .card:nth-child(4) { animation-delay: 0.34s; }
-.dashboard .card:nth-child(n+5) { animation-delay: 0.42s; }
-
-/* Paneles de los módulos (formulario y resultado) */
-.module-layout .panel { animation: slide-up 0.45s ease backwards; }
-.module-layout .panel:nth-child(2) { animation-delay: 0.08s; }
-.module-layout .panel:nth-child(3) { animation-delay: 0.16s; }
-
-/* Logo: brillo suave y continuo */
-.brand-mark { animation: glow 3.5s ease-in-out infinite; }
-
-/* ---------- Base de datos ---------- */
-
-/* Al cambiar de pestaña, el panel aparece con fundido */
-.db-panel.active { animation: slide-up 0.3s ease backwards; }
-
-/* Filas y carpetas: se animan solas cada vez que el JS las inserta */
-.db-table tbody tr { animation: slide-left 0.35s ease backwards; }
-.db-table tbody tr:nth-child(1)  { animation-delay: 0.00s; }
-.db-table tbody tr:nth-child(2)  { animation-delay: 0.04s; }
-.db-table tbody tr:nth-child(3)  { animation-delay: 0.08s; }
-.db-table tbody tr:nth-child(4)  { animation-delay: 0.12s; }
-.db-table tbody tr:nth-child(5)  { animation-delay: 0.16s; }
-.db-table tbody tr:nth-child(6)  { animation-delay: 0.20s; }
-.db-table tbody tr:nth-child(7)  { animation-delay: 0.24s; }
-.db-table tbody tr:nth-child(8)  { animation-delay: 0.28s; }
-.db-table tbody tr:nth-child(n+9) { animation-delay: 0.32s; }
-
-.carpeta-card { animation: pop 0.3s ease backwards; }
-.carpeta-card:nth-child(2) { animation-delay: 0.04s; }
-.carpeta-card:nth-child(3) { animation-delay: 0.08s; }
-.carpeta-card:nth-child(4) { animation-delay: 0.12s; }
-.carpeta-card:nth-child(n+5) { animation-delay: 0.16s; }
-
-/* Breadcrumb: el último tramo entra suavemente al navegar */
-.breadcrumb-item.activo { animation: fade 0.3s ease; }
-
-/* ---------- Resultados ---------- */
-
-.resultado > * { animation: slide-up 0.35s ease backwards; }
-
-.stat-box { animation: pop 0.4s ease backwards; }
-.stat-box:nth-child(1) { animation-delay: 0.05s; }
-.stat-box:nth-child(2) { animation-delay: 0.12s; }
-.stat-box:nth-child(3) { animation-delay: 0.19s; }
-.stat-box:nth-child(4) { animation-delay: 0.26s; }
-.stat-box:nth-child(n+5) { animation-delay: 0.33s; }
-
-.historial-item { animation: fade 0.3s ease backwards; }
-
-/* Barra de progreso: franjas en movimiento sobre el degradado */
-.barra-progreso {
-  background-image:
-    repeating-linear-gradient(
-      -45deg,
-      rgba(255, 255, 255, 0.16) 0 10px,
-      transparent 10px 20px
-    ),
-    linear-gradient(90deg, var(--accent-hover), var(--accent-bright));
-  background-size: 28px 100%, 100% 100%;
-  animation: stripes 0.8s linear infinite;
-}
-
-/* ---------- Estados y formularios ---------- */
-
-/* Punto "falta": late para llamar la atención */
-.estado.falta::before { animation: pulse-dot 1.8s ease-in-out infinite; }
-
-/* Checkbox: la marca "salta" al activarse */
-.field.checkbox input[type="checkbox"]:checked::after,
-.db-table .col-check input[type="checkbox"]:checked::after {
-  animation: check-pop 0.2s ease;
-}
-
-/* Error de login: aparece con sacudida */
-.login-error:not(:empty) { animation: shake 0.4s ease, fade 0.2s ease; }
-
-/* Botón de subir/ejecutar deshabilitado mientras procesa */
-.btn-primary:disabled,
-.login-submit:disabled { animation: pulse-opacity 1.2s ease-in-out infinite; }
-@keyframes pulse-opacity {
-  0%, 100% { opacity: 0.45; }
-  50%      { opacity: 0.7; }
-}
-
-/* Botones: micro-interacción al pasar el mouse */
-.btn-primary:hover,
-.login-submit:hover { transform: translateY(-1px); }
-.btn-primary,
-.login-submit { transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease; }
-.btn-primary:hover,
-.login-submit:hover { box-shadow: 0 6px 18px rgba(57, 169, 0, 0.3); }
-
-/* ---------- Footer / Copyright ---------- */
+/* ---------- 10. Footer / Copyright ---------- */
 
 .site-footer {
   max-width: 1100px;
@@ -1139,7 +1084,6 @@ a { color: var(--accent); }
   border-top: 1px solid rgba(128, 128, 128, 0.25);
   text-align: center;
 }
-
 .site-footer p {
   margin: 0;
   font-size: 0.85rem;
@@ -1147,76 +1091,18 @@ a { color: var(--accent); }
   letter-spacing: 0.01em;
 }
 
-/* ---------- 12. Juicios posteriores a Etapa Práctica ---------- */
+/* ---------- 11. Juicios posteriores a Etapa Práctica ---------- */
 /*
-   Este módulo utiliza los mismos componentes visuales que el resto
-   de SENA Nexus: topbar, panel, botones, campos, tablas y footer.
-   Todo está acotado a body.juicios para no afectar otros módulos.
+   Este módulo reutiliza los componentes compartidos (topbar, panel,
+   campos, botones, tablas y footer). Aquí solo queda lo específico,
+   acotado a body.juicios para no afectar otros módulos.
 */
 
-/* Respeta el atributo [hidden] aunque otra regla defina display */
-.juicios [hidden] {
-  display: none !important;
-}
+/* Encabezado: usa .topbar, .back-link y h1 */
+.juicios .topbar h1 { margin: 0; }
+.juicios .topbar > .back-link { margin-bottom: 0; }
 
-/* ---------- Encabezado ---------- */
-
-/*
-   El HTML de juicios utiliza el mismo encabezado que los demás módulos:
-   .topbar
-   .back-link
-   h1
-*/
-.juicios .topbar {
-  max-width: 1100px;
-}
-
-.juicios .topbar h1 {
-  margin: 0;
-}
-
-.juicios .topbar > .back-link {
-  margin-bottom: 0;
-}
-
-/* ---------- Contenedor principal ---------- */
-
-.juicios main {
-  display: grid;
-  gap: 18px;
-  max-width: 780px;
-  margin: 0 auto;
-  padding: 28px 24px 56px;
-}
-
-/*
-   Los apartados utilizan exactamente el mismo aspecto de .panel
-   utilizado por los demás módulos.
-*/
-.juicios main > section {
-  min-width: 0;
-  padding: 26px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  animation: slide-up 0.45s ease backwards;
-}
-
-.juicios main > section:nth-child(2) {
-  animation-delay: 0.08s;
-}
-
-/* ---------- Títulos ---------- */
-
-.juicios main > section > h2 {
-  margin: 0 0 18px;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--border);
-  font-family: var(--font-display);
-  font-size: 1.1rem;
-  font-weight: 800;
-}
-
+/* Apartados (el aspecto de panel viene de los componentes compartidos) */
 .juicios main > section > p {
   margin: 0 0 18px;
   color: var(--text-dim);
@@ -1229,7 +1115,6 @@ a { color: var(--accent); }
   font-size: 1rem;
   font-weight: 800;
 }
-
 .juicios h3 small {
   margin-left: 8px;
   color: var(--text-faint);
@@ -1238,96 +1123,20 @@ a { color: var(--accent); }
   font-weight: 500;
 }
 
-/* ---------- Formulario ---------- */
-
-.juicios form {
-  display: grid;
-  gap: 16px;
-}
-
-.juicios form br {
-  display: none;
-}
-
-.juicios form label[for] {
-  display: block;
-  margin-bottom: 7px;
-  color: var(--text-dim);
-  font-size: 0.83rem;
-  font-weight: 500;
-}
-
-/*
-   El input de archivos utiliza el mismo componente de campos
-   definido en la sección 3.
-*/
-.juicios input[type="file"] {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  height: 46px;
-  padding: 6px;
-  background-color: var(--bg-well);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  font-family: var(--font-body);
-  font-size: 0.9rem;
-  outline: none;
-  cursor: pointer;
-  transition:
-    border-color 0.15s ease,
-    background-color 0.15s ease,
-    box-shadow 0.15s ease;
-}
-
-.juicios input[type="file"]:hover {
-  border-color: var(--border-strong);
-  background-color: var(--panel-raised);
-}
-
-.juicios input[type="file"]:focus {
-  border-color: var(--accent);
-  background-color: var(--panel-raised);
-  box-shadow: 0 0 0 3px var(--accent-dim);
-}
-
-.juicios input[type="file"]::file-selector-button {
-  height: 100%;
-  margin-right: 12px;
-  padding: 0 14px;
-  background: var(--accent);
-  color: var(--on-accent);
-  border: none;
-  border-radius: 8px;
-  font-family: var(--font-body);
-  font-size: 0.82rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s ease;
-}
-
-.juicios input[type="file"]::file-selector-button:hover {
-  background: var(--accent-hover);
-}
+/* Formulario */
+.juicios form { display: grid; gap: 16px; }
+.juicios form br { display: none; }
 
 /* Lista de archivos seleccionados */
-
 #lista-archivos {
   margin: 10px 0 0;
   padding: 0;
   list-style: none;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
   font-size: 0.83rem;
 }
+#lista-archivos:empty { display: none; }
 
-#lista-archivos:empty {
-  display: none;
-}
-
-/* ---------- Checkbox ---------- */
-
+/* Checkbox con etiqueta */
 .juicios form label:has(input[type="checkbox"]) {
   display: flex;
   align-items: center;
@@ -1338,182 +1147,34 @@ a { color: var(--accent); }
   cursor: pointer;
 }
 
-.juicios input[type="checkbox"] {
-  appearance: none;
-  -webkit-appearance: none;
-  position: relative;
-  flex-shrink: 0;
-  width: 19px;
-  height: 19px;
-  margin: 0;
-  background: var(--bg-well);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  cursor: pointer;
-  transition:
-    background 0.15s ease,
-    border-color 0.15s ease,
-    box-shadow 0.15s ease;
-}
+/* Botón principal (estilo compartido con .btn-primary; el ID lo usa el JS) */
+#btn-ejecutar { justify-self: start; }
 
-.juicios input[type="checkbox"]:hover {
-  border-color: var(--accent);
-  background: var(--panel-raised);
-}
-
-.juicios input[type="checkbox"]:checked {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
-.juicios input[type="checkbox"]:checked::after {
-  content: "";
-  position: absolute;
-  left: 6px;
-  top: 2px;
-  width: 5px;
-  height: 10px;
-  border: solid var(--on-accent);
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg);
-  animation: check-pop 0.2s ease;
-}
-
-.juicios input[type="checkbox"]:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px var(--accent-dim);
-}
-
-/* ---------- Botón principal ---------- */
-
-/*
-   Mantiene el mismo lenguaje visual de .btn-primary.
-   Se conserva el ID porque lo utiliza el JavaScript.
-*/
-#btn-ejecutar {
-  justify-self: start;
-  padding: 11px 22px;
-  background: var(--accent);
-  color: var(--on-accent);
-  border: none;
-  border-radius: var(--radius-sm);
-  font-family: var(--font-body);
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    background 0.15s ease,
-    transform 0.15s ease,
-    box-shadow 0.15s ease;
-}
-
-#btn-ejecutar:hover {
-  background: var(--accent-hover);
-  transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(57, 169, 0, 0.3);
-}
-
-#btn-ejecutar:active {
-  transform: translateY(1px);
-}
-
-#btn-ejecutar:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
-  animation: pulse-opacity 1.2s ease-in-out infinite;
-}
-
-/* ---------- Estado ---------- */
-
+/* Estado */
 #estado {
   min-height: 1.4em;
   margin: 14px 0 0;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
   font-size: 0.85rem;
 }
 
-/* ---------- Resultado ---------- */
+/* Resultado */
+#seccion-resultados { overflow-x: auto; }
 
-#seccion-resultados {
-  overflow-x: auto;
-}
-
-#seccion-resultados > * {
-  animation: slide-up 0.35s ease backwards;
-}
-
-/* ---------- Descarga ---------- */
-
-#enlace-descarga {
-  display: inline-block;
-  padding: 9px 16px;
-  background: var(--green-dim);
-  color: var(--green);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  font-size: 0.85rem;
-  font-weight: 600;
-  text-decoration: none;
-  transition: border-color 0.15s ease;
-}
-
-#enlace-descarga:hover {
-  border-color: var(--green);
-}
-
-/* ---------- Resumen ---------- */
-
+/* Resumen: columna invertida para mostrar el número primero */
 #resumen-general {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 10px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
-
 #resumen-general li {
   display: flex;
   flex-direction: column-reverse;
-  padding: 14px 16px;
-  background: var(--bg-well);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
   color: var(--text-dim);
   font-size: 0.78rem;
-  animation: pop 0.4s ease backwards;
 }
-
 #resumen-general li b {
-  color: var(--text);
-  font-family: var(--font-display);
   font-size: 1.5rem;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
-}
-
-#resumen-general li:nth-child(1) {
-  animation-delay: 0.05s;
-}
-
-#resumen-general li:nth-child(2) {
-  animation-delay: 0.12s;
-}
-
-#resumen-general li:nth-child(3) {
-  animation-delay: 0.19s;
-}
-
-#resumen-general li:nth-child(4) {
-  animation-delay: 0.26s;
-}
-
-#resumen-general li:nth-child(n + 5) {
-  animation-delay: 0.33s;
 }
 
 /* Indicador de juicios posteriores */
@@ -1521,48 +1182,10 @@ a { color: var(--accent); }
   border-color: rgba(232, 169, 58, 0.45);
   background: var(--amber-dim);
 }
+#resumen-general li:nth-child(5) b { color: var(--amber); }
 
-#resumen-general li:nth-child(5) b {
-  color: var(--amber);
-}
-
-/* ---------- Tablas ---------- */
-
-.juicios table {
-  width: 100%;
-  border: 0;
-  border-collapse: collapse;
-  font-size: 0.85rem;
-}
-
-.juicios table th,
-.juicios table td {
-  padding: 10px;
-  text-align: left;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.juicios table th {
-  color: var(--text-dim);
-  font-size: 0.78rem;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.juicios table td {
-  font-family: var(--font-mono);
-  font-size: 0.83rem;
-}
-
-.juicios table tbody tr:last-child td {
-  border-bottom: none;
-}
-
-.juicios table tbody tr:hover td {
-  background: var(--panel-raised);
-}
-
+/* Tablas */
+.juicios table th { white-space: nowrap; }
 .juicios table td[colspan] {
   padding: 28px 10px;
   text-align: center;
@@ -1571,45 +1194,30 @@ a { color: var(--accent); }
   font-style: italic;
 }
 
-/* Tablas anchas */
+.tabla-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+#tabla-aprendices { min-width: 760px; }
 
-.tabla-scroll {
-  overflow-x: auto;
-}
-
-#tabla-aprendices {
-  min-width: 760px;
-}
-
-/* ---------- Avisos ---------- */
-
+/* Avisos */
 #bloque-advertencias,
 #bloque-sin-practica {
   margin-top: 22px;
   padding: 14px 18px;
   border-radius: var(--radius-sm);
 }
-
 #bloque-advertencias {
   background: var(--amber-dim);
   border: 1px solid rgba(232, 169, 58, 0.3);
 }
-
 #bloque-sin-practica {
   background: var(--bg-well);
   border: 1px solid var(--border);
 }
-
 #bloque-advertencias h3,
 #bloque-sin-practica h3 {
   margin: 0 0 8px;
   font-size: 0.92rem;
 }
-
-#bloque-advertencias h3 {
-  color: var(--amber);
-}
-
+#bloque-advertencias h3 { color: var(--amber); }
 #bloque-advertencias ul,
 #bloque-sin-practica ul {
   margin: 0;
@@ -1619,12 +1227,8 @@ a { color: var(--accent); }
   line-height: 1.6;
 }
 
-/* ---------- Detalle técnico ---------- */
-
-.juicios details {
-  margin-top: 24px;
-}
-
+/* Detalle técnico */
+.juicios details { margin-top: 24px; }
 .juicios summary {
   display: inline-block;
   padding: 6px 2px;
@@ -1634,10 +1238,7 @@ a { color: var(--accent); }
   cursor: pointer;
   transition: color 0.15s ease;
 }
-
-.juicios summary:hover {
-  color: var(--accent);
-}
+.juicios summary:hover { color: var(--accent); }
 
 #columnas-detectadas {
   max-height: 320px;
@@ -1653,28 +1254,7 @@ a { color: var(--accent); }
   overflow: auto;
 }
 
-/* ---------- Responsive ---------- */
-
-@media (max-width: 640px) {
-  .juicios .topbar {
-    padding: 20px 16px 6px;
-  }
-
-  .juicios main {
-    padding: 20px 16px 48px;
-  }
-
-  .juicios main > section {
-    padding: 20px;
-  }
-
-  #btn-ejecutar {
-    justify-self: stretch;
-  }
-}
-
-
-/* ---------- Ayuda por módulo (js/ayuda.js) ---------- */
+/* ---------- 12. Ayuda por módulo (js/ayuda.js) ---------- */
 
 /* Botón "?" junto al título */
 .btn-ayuda {
@@ -1709,6 +1289,7 @@ a { color: var(--accent); }
 .modal-ayuda {
   max-width: 560px;
   max-height: 85vh;
+  max-height: 85dvh;
   overflow-y: auto;
 }
 .modal-ayuda .ayuda-cuerpo { margin-bottom: 20px; }
@@ -1734,3 +1315,399 @@ a { color: var(--accent); }
 }
 .modal-ayuda li { margin-bottom: 6px; }
 .modal-ayuda li::marker { color: var(--accent); }
+
+/* ---------- 13. Animaciones ---------- */
+
+@keyframes pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes slide-left {
+  from { opacity: 0; transform: translateX(-14px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-6px); }
+  40%, 80% { transform: translateX(6px); }
+}
+@keyframes stripes {
+  from { background-position: 0 0; }
+  to   { background-position: 28px 0; }
+}
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor; }
+  50%      { box-shadow: 0 0 0 5px transparent; }
+}
+@keyframes pulse-opacity {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 0.7; }
+}
+@keyframes glow {
+  0%, 100% { box-shadow: 0 6px 18px rgba(57, 169, 0, 0.35); }
+  50%      { box-shadow: 0 6px 26px rgba(76, 196, 16, 0.6); }
+}
+@keyframes check-pop {
+  0%   { transform: rotate(45deg) scale(0); }
+  70%  { transform: rotate(45deg) scale(1.25); }
+  100% { transform: rotate(45deg) scale(1); }
+}
+
+/* Entrada de página */
+.topbar  { animation: fade 0.4s ease backwards; }
+.hero h2 { animation: slide-up 0.5s ease 0.05s backwards; }
+.hero p  { animation: slide-up 0.5s ease 0.15s backwards; }
+
+/* Tarjetas del inicio: aparecen en cascada */
+.dashboard .card { animation: slide-up 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) backwards; }
+.dashboard .card:nth-child(1)   { animation-delay: 0.10s; }
+.dashboard .card:nth-child(2)   { animation-delay: 0.18s; }
+.dashboard .card:nth-child(3)   { animation-delay: 0.26s; }
+.dashboard .card:nth-child(4)   { animation-delay: 0.34s; }
+.dashboard .card:nth-child(n+5) { animation-delay: 0.42s; }
+
+/* Paneles de los módulos (formulario y resultado; también Juicios) */
+.module-layout .panel,
+.juicios main > section { animation: slide-up 0.45s ease backwards; }
+.module-layout .panel:nth-child(2),
+.juicios main > section:nth-child(2) { animation-delay: 0.08s; }
+.module-layout .panel:nth-child(3)   { animation-delay: 0.16s; }
+
+/* Logo: brillo suave y continuo */
+.brand-mark { animation: glow 3.5s ease-in-out infinite; }
+
+/* Modal y login */
+.modal-overlay { animation: fade 0.15s ease; }
+.modal         { animation: pop 0.15s ease; }
+.login-card    { animation: pop 0.2s ease; }
+
+/* Base de datos: el panel aparece al cambiar de pestaña */
+.db-panel.active { animation: slide-up 0.3s ease backwards; }
+
+/* Filas y carpetas: se animan solas cada vez que el JS las inserta */
+.db-table tbody tr { animation: slide-left 0.35s ease backwards; }
+.db-table tbody tr:nth-child(1)   { animation-delay: 0.00s; }
+.db-table tbody tr:nth-child(2)   { animation-delay: 0.04s; }
+.db-table tbody tr:nth-child(3)   { animation-delay: 0.08s; }
+.db-table tbody tr:nth-child(4)   { animation-delay: 0.12s; }
+.db-table tbody tr:nth-child(5)   { animation-delay: 0.16s; }
+.db-table tbody tr:nth-child(6)   { animation-delay: 0.20s; }
+.db-table tbody tr:nth-child(7)   { animation-delay: 0.24s; }
+.db-table tbody tr:nth-child(8)   { animation-delay: 0.28s; }
+.db-table tbody tr:nth-child(n+9) { animation-delay: 0.32s; }
+
+.carpeta-card { animation: pop 0.3s ease backwards; }
+.carpeta-card:nth-child(2)   { animation-delay: 0.04s; }
+.carpeta-card:nth-child(3)   { animation-delay: 0.08s; }
+.carpeta-card:nth-child(4)   { animation-delay: 0.12s; }
+.carpeta-card:nth-child(n+5) { animation-delay: 0.16s; }
+
+/* Breadcrumb: el último tramo entra suavemente al navegar */
+.breadcrumb-item.activo { animation: fade 0.3s ease; }
+
+/* Resultados */
+.resultado > *,
+#seccion-resultados > * { animation: slide-up 0.35s ease backwards; }
+
+.stat-box,
+#resumen-general li { animation: pop 0.4s ease backwards; }
+.stat-box:nth-child(1),
+#resumen-general li:nth-child(1)   { animation-delay: 0.05s; }
+.stat-box:nth-child(2),
+#resumen-general li:nth-child(2)   { animation-delay: 0.12s; }
+.stat-box:nth-child(3),
+#resumen-general li:nth-child(3)   { animation-delay: 0.19s; }
+.stat-box:nth-child(4),
+#resumen-general li:nth-child(4)   { animation-delay: 0.26s; }
+.stat-box:nth-child(n+5),
+#resumen-general li:nth-child(n+5) { animation-delay: 0.33s; }
+
+.historial-item { animation: fade 0.3s ease backwards; }
+
+/* Barra de progreso: franjas en movimiento sobre el degradado */
+.barra-progreso { animation: stripes 0.8s linear infinite; }
+
+/* Estados y formularios */
+.estado.falta::before { animation: pulse-dot 1.8s ease-in-out infinite; }
+
+/* Checkbox: la marca "salta" al activarse */
+.field.checkbox input[type="checkbox"]:checked::after,
+.db-table .col-check input[type="checkbox"]:checked::after,
+.juicios input[type="checkbox"]:checked::after { animation: check-pop 0.2s ease; }
+
+/* Error de login: aparece con sacudida */
+.login-error:not(:empty) { animation: shake 0.4s ease, fade 0.2s ease; }
+
+/* ---------- 14. Responsive ---------- */
+/* Va al final del archivo para ganar sobre las reglas base. */
+
+/* Pantallas táctiles: sin hover, lo importante debe estar visible */
+@media (hover: none) {
+  .btn-eliminar-carpeta { opacity: 1; }
+  .card:hover,
+  .carpeta-card:hover { transform: none; }
+}
+
+/* Tableta */
+@media (max-width: 900px) {
+  .topbar { padding: 22px 20px 8px; }
+  .hero { padding: 36px 20px 8px; }
+  .dashboard { padding: 0 20px; }
+  .module-layout,
+  .db-page,
+  .juicios main { padding: 24px 20px 52px; }
+  .site-footer { padding-left: 20px; padding-right: 20px; }
+
+  .db-table { min-width: 640px; }
+  .db-table td.col-nombre { min-width: 180px; }
+}
+
+/* Móvil */
+@media (max-width: 640px) {
+  /* "fixed" falla en iOS Safari */
+  body { background-attachment: scroll; }
+
+  /* 16px evita el zoom automático de iOS al enfocar un campo */
+  .field select,
+  .field input[type="number"],
+  .upload-form input[type="text"],
+  .modal-input,
+  .password-input,
+  .select-mover-archivo { font-size: 1rem; }
+
+  /* Encabezado */
+  .topbar { padding: 20px 16px 6px; gap: 12px; }
+  .topbar h1 { font-size: 1.25rem; }
+  .topbar-actions { width: 100%; flex-wrap: wrap; }
+  .topbar-actions .btn-database,
+  .topbar-actions .btn-logout { flex: 1 1 auto; justify-content: center; }
+  .brand-mark { width: 40px; height: 40px; border-radius: 12px; }
+
+  /* Inicio */
+  .hero { padding: 32px 16px 6px; }
+  .hero p { font-size: 1rem; }
+  .dashboard { gap: 14px; margin: 22px auto 40px; padding: 0 16px; }
+  .card { padding: 22px; }
+
+  /* Módulos */
+  .module-layout,
+  .db-page,
+  .juicios main { padding: 20px 16px 48px; }
+  .panel,
+  .juicios main > section { padding: 20px; }
+
+  .stat-grid,
+  #resumen-general { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat-box .valor,
+  #resumen-general li b { font-size: 1.3rem; }
+
+  .tabla-fichas { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .historial-item { flex-direction: column; gap: 4px; }
+  .juicios h3 small { display: block; margin: 4px 0 0; }
+  #btn-ejecutar { justify-self: stretch; }
+
+  /* Base de datos */
+  .db-panel.active { padding: 16px; }
+  .db-tab { padding: 9px 14px; }
+  .upload-form { padding: 12px; }
+  .upload-form input[type="file"],
+  .upload-form input[type="text"],
+  .upload-form button { flex: 1 1 100%; width: 100%; }
+  .db-breadcrumb { font-size: 0.78rem; }
+  .db-carpetas-toolbar .btn-nueva-carpeta { flex: 1 1 100%; justify-content: center; }
+
+  /* Modal */
+  .modal-overlay { padding: 12px; }
+  .modal { padding: 22px 20px 18px; }
+  .modal-actions { flex-direction: column-reverse; }
+  .modal-actions button { width: 100%; }
+  .modal-ayuda { max-height: 90vh; max-height: 90dvh; }
+
+  /* Login */
+  .login-page { padding: 20px 16px 32px; }
+  .login-card { padding: 28px 22px 24px; }
+  .login-brand h1 { font-size: 1.4rem; }
+
+  /* Footer */
+  .site-footer { margin-top: 32px; padding: 16px 16px 24px; }
+}
+
+/* Móvil pequeño */
+@media (max-width: 380px) {
+  .topbar h1 { font-size: 1.15rem; }
+  .card-icon { width: 46px; height: 46px; }
+  .card-icon svg { width: 23px; height: 23px; }
+  .stat-grid,
+  #resumen-general { grid-template-columns: 1fr; }
+  .login-card { padding: 24px 18px 20px; }
+}
+
+/* Chat Bot */
+
+#cb-root {
+  --cb-acento: #39a900;
+  --cb-acento-oscuro: #2d8600;
+  --cb-fondo: #ffffff;
+  --cb-fondo-bot: #f1f3f4;
+  --cb-texto: #1f2933;
+  --cb-borde: #d9dee3;
+  --cb-error: #b42318;
+  --cb-error-fondo: #fdecea;
+
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 9999;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  color: var(--cb-texto);
+}
+
+#cb-root *,
+#cb-root *::before,
+#cb-root *::after {
+  box-sizing: border-box;
+}
+
+/* Botón flotante */
+#cb-root .cb-boton {
+  width: 56px;
+  height: 56px;
+  border: none;
+  border-radius: 50%;
+  background: var(--cb-acento);
+  color: #fff;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+#cb-root .cb-boton:hover { background: var(--cb-acento-oscuro); transform: scale(1.05); }
+#cb-root .cb-boton:focus-visible { outline: 3px solid #1f2933; outline-offset: 2px; }
+#cb-root.cb-abierto .cb-boton { display: none; }
+
+/* Panel */
+#cb-root .cb-panel {
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  height: 520px;
+  max-height: calc(100vh - 40px);
+  background: var(--cb-fondo);
+  border: 1px solid var(--cb-borde);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+#cb-root .cb-panel[hidden] { display: none; }
+
+#cb-root .cb-encabezado {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: var(--cb-acento);
+  color: #fff;
+}
+#cb-root .cb-titulo { font-weight: 600; font-size: 15px; }
+#cb-root .cb-acciones { display: flex; gap: 4px; }
+#cb-root .cb-acciones button {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+}
+#cb-root .cb-acciones button:hover { background: rgba(255, 255, 255, 0.2); }
+
+/* Mensajes */
+#cb-root .cb-mensajes {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--cb-fondo);
+}
+#cb-root .cb-msg {
+  max-width: 85%;
+  padding: 9px 12px;
+  border-radius: 12px;
+  line-height: 1.4;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+#cb-root .cb-msg-user {
+  align-self: flex-end;
+  background: var(--cb-acento);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+  white-space: pre-wrap;
+}
+#cb-root .cb-msg-bot {
+  align-self: flex-start;
+  background: var(--cb-fondo-bot);
+  border-bottom-left-radius: 4px;
+}
+#cb-root .cb-msg-error { background: var(--cb-error-fondo); color: var(--cb-error); }
+#cb-root .cb-fuentes {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--cb-borde);
+  font-size: 12px;
+  opacity: 0.75;
+}
+#cb-root .cb-escribiendo { font-style: italic; opacity: 0.7; }
+
+/* Entrada */
+#cb-root .cb-entrada-caja {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--cb-borde);
+  background: var(--cb-fondo);
+}
+#cb-root .cb-entrada {
+  flex: 1;
+  resize: none;
+  max-height: 120px;
+  padding: 8px 10px;
+  border: 1px solid var(--cb-borde);
+  border-radius: 8px;
+  font: inherit;
+  color: inherit;
+}
+#cb-root .cb-entrada:focus { outline: 2px solid var(--cb-acento); border-color: transparent; }
+#cb-root .cb-enviar {
+  padding: 8px 14px;
+  border: none;
+  border-radius: 8px;
+  background: var(--cb-acento);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+#cb-root .cb-enviar:hover:not(:disabled) { background: var(--cb-acento-oscuro); }
+#cb-root .cb-enviar:disabled,
+#cb-root .cb-entrada:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Móvil */
+@media (max-width: 480px) {
+  #cb-root { right: 12px; bottom: 12px; }
+  #cb-root .cb-panel {
+    width: calc(100vw - 24px);
+    height: 75vh;
+  }
+}

@@ -14,3 +14,5 @@ supabase
 itsdangerous
 bcrypt
 rapidfuzz>=3.9.0
+httpx
+python-docx
