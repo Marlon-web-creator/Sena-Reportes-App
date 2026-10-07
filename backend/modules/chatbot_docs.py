@@ -36,6 +36,13 @@ STOPWORDS = {
     "entre", "hacer", "usar", "quiero", "necesito",
 }
 
+# Detecta encabezados al inicio de línea: "ARTÍCULO 1o.", "Artículo 48.", "PARÁGRAFO 2o."
+RE_ENCABEZADO = re.compile(
+    r"^[ \t>*#\"“]*(?P<tipo>art[ií]culo|par[aá]grafo)\s+(?P<num>\d+\s?[oº°]?)\.",
+    re.IGNORECASE | re.MULTILINE,
+)
+RE_PAGINA_MD = re.compile(r"^#{1,3}\s*P[áa]gina\s+(\d+)\s*$", re.IGNORECASE | re.MULTILINE)
+
 # archivo_id -> {"huella": (...), "fragmentos": [...]}
 _cache: dict[int, dict] = {}
 _lock = threading.Lock()
@@ -123,10 +130,22 @@ def _secciones_xlsx(datos: bytes):
     return secciones
 
 
-def _secciones_texto(datos: bytes):
     texto = datos.decode("utf-8", errors="replace").strip()
     return [(None, texto)] if texto else []
-
+def _secciones_texto(datos: bytes):
+    texto = datos.decode("utf-8", errors="replace").strip()
+    if not texto:
+        return []
+    partes = RE_PAGINA_MD.split(texto)
+    if len(partes) > 1:
+        secciones = []
+        if partes[0].strip():
+            secciones.append((None, partes[0].strip()))
+        for num, cuerpo in zip(partes[1::2], partes[2::2]):
+            if cuerpo.strip():
+                secciones.append((f"pág. {num}", cuerpo.strip()))
+        return secciones
+    return [(None, texto)]
 
 def _extraer_secciones(nombre: str, datos: bytes):
     ext = nombre.lower().rsplit(".", 1)[-1]
@@ -143,28 +162,6 @@ def _extraer_secciones(nombre: str, datos: bytes):
 # FRAGMENTACIÓN
 # ============================================================
 
-def _dividir(texto: str) -> list[str]:
-    texto = re.sub(r"[ \t]+", " ", texto).strip()
-    fragmentos = []
-    i = 0
-    while i < len(texto):
-        fin = min(i + TAMANO_FRAGMENTO, len(texto))
-        if fin < len(texto):
-            corte = texto.rfind("\n", i + TAMANO_FRAGMENTO // 2, fin)
-            if corte == -1:
-                corte = texto.rfind(". ", i + TAMANO_FRAGMENTO // 2, fin)
-            if corte != -1:
-                fin = corte + 1
-        trozo = texto[i:fin].strip()
-        if trozo:
-            fragmentos.append(trozo)
-        if fin >= len(texto):
-            break
-        i = max(fin - SOLAPE_FRAGMENTO, i + 1)
-    return fragmentos
-
-
-def _fragmentos_de_archivo(archivo: dict) -> list[dict]:
     nombre = archivo["nombre_original"]
     datos = supabase_storage.descargar_bytes(archivo["ruta"])
 
@@ -180,7 +177,88 @@ def _fragmentos_de_archivo(archivo: dict) -> list[dict]:
                 "_nombre_claves": set(_palabras_clave(nombre)),
             })
     return fragmentos
+def _limpiar(texto: str) -> str:
+    return re.sub(r"[ \t]+", " ", texto).strip()
 
+
+def _dividir(texto: str) -> list[tuple[int, int, str]]:
+    """Recibe texto ya limpio. Devuelve (inicio, fin, trozo)."""
+    fragmentos = []
+    i = 0
+    while i < len(texto):
+        fin = min(i + TAMANO_FRAGMENTO, len(texto))
+        if fin < len(texto):
+            corte = texto.rfind("\n", i + TAMANO_FRAGMENTO // 2, fin)
+            if corte == -1:
+                corte = texto.rfind(". ", i + TAMANO_FRAGMENTO // 2, fin)
+            if corte != -1:
+                fin = corte + 1
+        trozo = texto[i:fin].strip()
+        if trozo:
+            fragmentos.append((i, fin, trozo))
+        if fin >= len(texto):
+            break
+        i = max(fin - SOLAPE_FRAGMENTO, i + 1)
+    return fragmentos
+
+
+def _marcas_estructura(texto: str) -> list[tuple[int, str, str]]:
+    marcas = []
+    for m in RE_ENCABEZADO.finditer(texto):
+        tipo = "articulo" if m.group("tipo").lower().startswith("art") else "paragrafo"
+        marcas.append((m.start(), tipo, re.sub(r"\s+", "", m.group("num"))))
+    return marcas
+
+
+def _aplicar_marca(estado: dict, tipo: str, num: str) -> None:
+    if tipo == "articulo":
+        estado["articulo"] = f"Artículo {num}"
+        estado["paragrafo"] = None
+    else:
+        estado["paragrafo"] = f"Parágrafo {num}"
+
+
+def _rotulo(estado: dict) -> str:
+    return ", ".join(x for x in (estado["articulo"], estado["paragrafo"]) if x)
+
+
+def _fragmentos_de_archivo(archivo: dict) -> list[dict]:
+    nombre = archivo["nombre_original"]
+    datos = supabase_storage.descargar_bytes(archivo["ruta"])
+
+    estado = {"articulo": None, "paragrafo": None}  # se arrastra entre páginas
+    fragmentos = []
+
+    for pagina, texto in _extraer_secciones(nombre, datos):
+        texto = _limpiar(texto)
+        marcas = _marcas_estructura(texto)
+
+        for inicio, fin, trozo in _dividir(texto):
+            local = dict(estado)
+            for pos, tipo, num in marcas:          # estado al inicio del fragmento
+                if pos <= inicio:
+                    _aplicar_marca(local, tipo, num)
+            rotulos = [_rotulo(local)]
+            for pos, tipo, num in marcas:          # encabezados dentro del fragmento
+                if inicio < pos < fin:
+                    _aplicar_marca(local, tipo, num)
+                    rotulos.append(_rotulo(local))
+            rotulos = [r for r in dict.fromkeys(rotulos) if r]
+
+            partes = [p for p in (pagina, "; ".join(rotulos)) if p]
+            fragmentos.append({
+                "archivo": nombre,
+                "archivo_id": archivo["id"],
+                "ubicacion": " · ".join(partes) or None,
+                "texto": trozo,
+                "_conteo": Counter(_palabras_clave(trozo)),
+                "_nombre_claves": set(_palabras_clave(nombre)),
+            })
+
+        for pos, tipo, num in marcas:              # estado al final de la página
+            _aplicar_marca(estado, tipo, num)
+
+    return fragmentos
 
 # ============================================================
 # API DEL MÓDULO
