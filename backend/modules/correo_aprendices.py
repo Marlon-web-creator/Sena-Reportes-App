@@ -21,14 +21,16 @@ igual que en no_aprobados.py:
 
 La columna de SALIDA en el consolidado tampoco es fija: se reutiliza la
 columna "Correo Electrónico" si ya existe, o se crea justo después de la
-última columna realmente usada de cada hoja.
+última columna realmente usada de cada hoja. Cuando la columna es nueva,
+hereda el diseño (fuente, borde, relleno, alineación y ancho) de la
+columna que queda justo a su izquierda.
 """
 
 import re
 import unicodedata
+from copy import copy
 from pathlib import Path
 
-from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from modules.file_utils import cargar_workbook_compatible
@@ -39,6 +41,9 @@ COL_CORREO_XLS_DEFECTO = 6               # F
 COL_DOCUMENTO_CONSOLIDADO_DEFECTO = 4    # D
 
 ENCABEZADO_CORREO_SALIDA = "Correo Electrónico"
+
+# Ancho mínimo de la columna de correo cuando es nueva, para que no se corten.
+ANCHO_MINIMO_COLUMNA_CORREO = 30
 
 # Cuántas filas desde arriba se inspeccionan buscando el encabezado real
 # (por si hay títulos, logos, filas vacías, etc.).
@@ -279,6 +284,17 @@ def _columna_salida(ws, fila_encabezado: int) -> int:
     return ultima_usada + 1
 
 
+def _copiar_estilo(origen, destino) -> None:
+    """Copia fuente, borde, relleno, formato numérico, protección y alineación."""
+    if origen.has_style:
+        destino.font = copy(origen.font)
+        destino.border = copy(origen.border)
+        destino.fill = copy(origen.fill)
+        destino.number_format = origen.number_format
+        destino.protection = copy(origen.protection)
+        destino.alignment = copy(origen.alignment)
+
+
 def _detectar_documento_consolidado(ws) -> tuple[int, int, int]:
     """
     Devuelve (fila_inicio, fila_encabezado, col_documento) detectados en
@@ -339,13 +355,26 @@ def enriquecer_con_correos(
         fila_inicio, fila_encabezado, col_documento = _detectar_documento_consolidado(ws)
 
         col_salida = _columna_salida(ws, fila_encabezado)
+        es_nueva = ws.cell(fila_encabezado, col_salida).value in (None, "")
+        col_referencia = col_salida - 1 if col_salida > 1 else None
+
         columnas_salida.append({
             "hoja": ws.title,
             "fila_inicio_datos": fila_inicio,
             "columna_documento": get_column_letter(col_documento),
             "columna_salida": get_column_letter(col_salida),
         })
-        ws.cell(fila_encabezado, col_salida, ENCABEZADO_CORREO_SALIDA).font = Font(bold=True)
+
+        # Encabezado: se escribe y, si la columna es nueva, hereda el estilo del vecino.
+        celda_encabezado = ws.cell(fila_encabezado, col_salida, ENCABEZADO_CORREO_SALIDA)
+        if es_nueva and col_referencia:
+            _copiar_estilo(ws.cell(fila_encabezado, col_referencia), celda_encabezado)
+
+            # Ancho de columna: el del vecino, con un mínimo para que quepan los correos.
+            ancho_ref = ws.column_dimensions[get_column_letter(col_referencia)].width
+            ws.column_dimensions[get_column_letter(col_salida)].width = max(
+                ancho_ref or 0, ANCHO_MINIMO_COLUMNA_CORREO
+            )
 
         for fila in range(fila_inicio, ws.max_row + 1):
             documento_valor = ws.cell(fila, col_documento).value
@@ -356,8 +385,12 @@ def enriquecer_con_correos(
             total_documentos += 1
             correo = mapa_correos.get(documento)
 
+            celda = ws.cell(fila, col_salida)
+            if es_nueva and col_referencia:
+                _copiar_estilo(ws.cell(fila, col_referencia), celda)
+
             if correo:
-                ws.cell(fila, col_salida, correo)
+                celda.value = correo
                 total_encontrados += 1
             else:
                 documentos_sin_correo.append(documento)
