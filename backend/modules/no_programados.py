@@ -36,6 +36,7 @@ import re
 import sys
 import time
 import unicodedata
+from functools import lru_cache
 from collections import Counter
 from copy import copy
 from pathlib import Path
@@ -43,6 +44,7 @@ from typing import Callable, Optional
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles.cell_style import StyleArray
 from openpyxl.utils import get_column_letter, range_boundaries
 from openpyxl.worksheet.table import TableColumn
 from rapidfuzz import fuzz
@@ -186,8 +188,33 @@ def _pico_ram_mb() -> float:
         return 0.0
 
 
+def _ram_actual_mb() -> float:
+    """RAM residente actual del proceso en MB (Linux; 0 si no se puede leer)."""
+    try:
+        with open("/proc/self/status") as f:
+            for linea in f:
+                if linea.startswith("VmRSS:"):
+                    return int(linea.split()[1]) / 1024
+    except Exception:
+        pass
+    return 0.0
+
+
+def _liberar_memoria():
+    """gc + malloc_trim: devuelve al sistema la memoria que Python ya no usa."""
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)  # solo glibc (Debian/Ubuntu)
+    except Exception:
+        pass
+
+
 def _notificar(callback: ProgressCallback, mensaje: str, actual: int = 0, total: int = 0):
-    logger.info("[progreso] %s (%d/%d) | pico RAM %.0f MB", mensaje, actual, total, _pico_ram_mb())
+    logger.info(
+        "[progreso] %s (%d/%d) | RAM %.0f MB (pico %.0f MB)",
+        mensaje, actual, total, _ram_actual_mb(), _pico_ram_mb(),
+    )
     if callback:
         try:
             callback(mensaje, actual, total)
@@ -199,10 +226,21 @@ def _notificar(callback: ProgressCallback, mensaje: str, actual: int = 0, total:
 # TEXTO
 # ============================================================
 
+# Los mismos textos (competencias, nombres de instructor, encabezados) se
+# repiten miles de veces en el export: se normalizan una sola vez y se
+# reutiliza el resultado. El tamaño de la caché está acotado (RAM controlada).
+NP_CACHE_TEXTO = int(os.environ.get("NP_CACHE_TEXTO") or 50000)
+
+
 def normalizar_texto(texto):
     if not texto:
         return ""
-    texto = str(texto).upper()
+    return _normalizar_str(texto if isinstance(texto, str) else str(texto))
+
+
+@lru_cache(maxsize=NP_CACHE_TEXTO)
+def _normalizar_str(texto):
+    texto = texto.upper()
     texto = unicodedata.normalize("NFD", texto)
     texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
     for viejo, nuevo in {"\n": " ", "\r": " ", "\t": " ", "–": "-", "—": "-",
@@ -232,6 +270,7 @@ def _ficha_de_titulo(titulo: str) -> str:
     return m.group(1) if m else ""
 
 
+@lru_cache(maxsize=NP_CACHE_TEXTO)
 def _instructor_valido(nombre, documento) -> bool:
     """True si al menos uno de los dos campos trae un instructor real."""
     for valor in (nombre, documento):
@@ -338,12 +377,17 @@ def _ultima_col_con_encabezado(ws, fila_encabezado, max_col, excluir=frozenset()
 
 
 def _columna_vacia(ws, col, fila_desde):
-    """True si la columna no tiene ningún valor desde `fila_desde` hacia abajo."""
-    for (valor,) in ws.iter_rows(
-        min_row=fila_desde, max_row=ws.max_row, min_col=col, max_col=col, values_only=True
-    ):
-        if valor is not None and str(valor).strip() != "":
-            return False
+    """
+    True si la columna no tiene ningún valor desde `fila_desde` hacia abajo.
+    Recorre solo las celdas que existen: ws.iter_rows() sobre un libro abierto
+    en modo normal crea celdas vacías hasta ws.max_row (RAM y tiempo perdidos
+    en hojas con formato arrastrado hacia abajo).
+    """
+    for (fila, c), celda in ws._cells.items():
+        if c == col and fila >= fila_desde:
+            valor = celda.value
+            if valor is not None and str(valor).strip() != "":
+                return False
     return True
 
 
@@ -451,9 +495,15 @@ def extraer_competencia(valor):
     return (codigo, descripcion) if descripcion else (codigo, None)
 
 
+def _valor_celda(ws, fila, col):
+    """Valor de una celda SIN crearla (ws.cell() crea celdas vacías al leer)."""
+    celda = ws._cells.get((fila, col))
+    return celda.value if celda is not None else None
+
+
 def fila_es_valida(ws, fila, cols: "ColumnasHoja"):
-    valor_codigo = ws.cell(fila, cols.codigo).value
-    valor_competencia = ws.cell(fila, cols.competencia).value
+    valor_codigo = _valor_celda(ws, fila, cols.codigo)
+    valor_competencia = _valor_celda(ws, fila, cols.competencia)
     if valor_codigo is None or valor_competencia is None:
         return False
     texto_codigo = normalizar_texto(valor_codigo)
@@ -920,7 +970,9 @@ def aplicar_formato_salida(ws, cols: "ColumnasHoja", ultima_fila: int):
         nuevas (respetando lo que ya necesitaban las columnas originales).
 
     Se llama DESPUÉS de reordenar, para que el alto corresponda al contenido
-    final de cada fila.
+    final de cada fila. Los estilos se asignan por índice (StyleArray) en vez
+    de crear objetos Font/Fill/Border/Alignment por celda: mismo resultado,
+    mucho más rápido.
     """
     anchos = {clave: ancho for clave, _enc, ancho in COLUMNAS_SALIDA}
 
@@ -937,23 +989,47 @@ def aplicar_formato_salida(ws, cols: "ColumnasHoja", ultima_fila: int):
         if clave in cols.creadas:
             ws.column_dimensions[get_column_letter(col)].width = anchos[clave]
 
+    # Alineación de las columnas nuevas: se registra UNA vez y se reutiliza por id.
+    id_alineacion = ws.parent._alignments.add(
+        Alignment(horizontal="left", vertical="top", wrap_text=True)
+    )
+
+    # Ancho de cada columna, leído una sola vez.
+    cache_ancho = {}
+
+    def ancho_de(c):
+        if c not in cache_ancho:
+            cache_ancho[c] = ws.column_dimensions[get_column_letter(c)].width
+        return cache_ancho[c]
+
+    columnas_salida = list(cols.salida.items())
+    anchos_salida = {col: (ancho_de(col) or anchos[clave]) for clave, col in columnas_salida}
+    columnas_originales = range(1, cols.ultima_col_tabla + 1)
+
     # Filas de datos
     for fila in range(cols.fila_encabezado + 1, ultima_fila + 1):
-        ref = ws.cell(fila, cols.col_estilo)
+        estilo_ref = ws.cell(fila, cols.col_estilo)._style
         lineas_nuevas = 1
-        for clave, col in cols.salida.items():
+        for _clave, col in columnas_salida:
             celda = ws.cell(fila, col)
-            _copiar_estilo(ref, celda)
-            celda.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-            ancho = ws.column_dimensions[get_column_letter(col)].width or anchos[clave]
-            lineas_nuevas = max(lineas_nuevas, _lineas_estimadas(celda.value, ancho))
+            nuevo = StyleArray()                 # numFmtId=0 -> "General"
+            nuevo.fontId = estilo_ref.fontId
+            nuevo.fillId = estilo_ref.fillId
+            nuevo.borderId = estilo_ref.borderId
+            nuevo.protectionId = estilo_ref.protectionId
+            nuevo.alignmentId = id_alineacion
+            celda._style = nuevo
+            if celda.value is not None:
+                lineas_nuevas = max(lineas_nuevas, _lineas_estimadas(celda.value, anchos_salida[col]))
 
         lineas_originales = 1
-        for c in range(1, cols.ultima_col_tabla + 1):
-            celda = ws.cell(fila, c)
-            if celda.alignment is not None and celda.alignment.wrap_text and isinstance(celda.value, str):
-                ancho = ws.column_dimensions[get_column_letter(c)].width
-                lineas_originales = max(lineas_originales, _lineas_estimadas(celda.value, ancho))
+        for c in columnas_originales:
+            celda = ws._cells.get((fila, c))
+            if celda is None or not isinstance(celda.value, str):
+                continue
+            alineacion = celda.alignment
+            if alineacion is not None and alineacion.wrap_text:
+                lineas_originales = max(lineas_originales, _lineas_estimadas(celda.value, ancho_de(c)))
 
         lineas = max(lineas_originales, min(lineas_nuevas, MAX_LINEAS_FILA))
         if lineas > 1:
@@ -970,6 +1046,10 @@ def reordenar_filas_por_estado(ws, orden_por_fila, cols: "ColumnasHoja"):
     Dentro del bloque de filas de cada aprendiz (mismo documento), ordena
     por `orden_por_fila` (índice del caso; ver ORDEN_CASO). El orden es
     estable: a igual caso se conserva el orden original.
+
+    Solo se mueven los bloques que realmente cambian de orden, y se mueven
+    el valor y el índice de estilo de cada celda (equivale a copiar fuente,
+    relleno, borde, alineación, formato y protección, pero sin crear objetos).
     """
     filas = sorted(orden_por_fila.keys())
     if len(filas) < 2:
@@ -978,27 +1058,17 @@ def reordenar_filas_por_estado(ws, orden_por_fila, cols: "ColumnasHoja"):
     max_col = ws.max_column
 
     def capturar_fila(fila):
-        celdas = []
+        datos = []
         for c in range(1, max_col + 1):
             celda = ws.cell(fila, c)
-            celdas.append({
-                "valor": celda.value, "fill": copy(celda.fill), "font": copy(celda.font),
-                "border": copy(celda.border), "alignment": copy(celda.alignment),
-                "number_format": celda.number_format, "protection": copy(celda.protection),
-            })
-        return celdas
+            datos.append((celda.value, copy(celda._style)))
+        return datos
 
     def aplicar_fila(fila, datos_fila):
-        for c in range(1, max_col + 1):
+        for c, (valor, estilo) in enumerate(datos_fila, start=1):
             celda = ws.cell(fila, c)
-            datos = datos_fila[c - 1]
-            celda.value = datos["valor"]
-            celda.fill = datos["fill"]
-            celda.font = datos["font"]
-            celda.border = datos["border"]
-            celda.alignment = datos["alignment"]
-            celda.number_format = datos["number_format"]
-            celda.protection = datos["protection"]
+            celda.value = valor
+            celda._style = copy(estilo)
 
     bloques = []
     bloque_actual = [filas[0]]
@@ -1016,10 +1086,14 @@ def reordenar_filas_por_estado(ws, orden_por_fila, cols: "ColumnasHoja"):
     for bloque in bloques:
         if len(bloque) < 2:
             continue
-        snapshots = {f: capturar_fila(f) for f in bloque}
         orden_nuevo = sorted(bloque, key=lambda f: orden_por_fila[f])
+        if orden_nuevo == bloque:
+            continue  # ya está en el orden correcto
+        movidas = {origen for destino, origen in zip(bloque, orden_nuevo) if destino != origen}
+        snapshots = {f: capturar_fila(f) for f in movidas}
         for posicion, fila_origen in zip(bloque, orden_nuevo):
-            aplicar_fila(posicion, snapshots[fila_origen])
+            if posicion != fila_origen:
+                aplicar_fila(posicion, snapshots[fila_origen])
 
 
 def escribir_hoja_reporte(wb, datos_fichas, resultados_globales):
@@ -1060,30 +1134,39 @@ def escribir_hoja_reporte(wb, datos_fichas, resultados_globales):
 
     # Encabezado con estilo propio, filtros y primera fila fija.
     borde = Side(style="thin", color="808080")
+    borde_completo = Border(left=borde, right=borde, top=borde, bottom=borde)
     for celda in ws[1]:
         celda.font = Font(bold=True, color="FFFFFF")
         celda.fill = PatternFill("solid", fgColor="1F4E78")
-        celda.border = Border(left=borde, right=borde, top=borde, bottom=borde)
+        celda.border = borde_completo
         celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
 
     # Texto con wrap, pero la fila no crece más de MAX_LINEAS_FILA líneas.
+    # Cada columna se estiliza UNA vez (primera fila de datos) y el resto de
+    # filas copia ese índice de estilo: evita crear un Border/Alignment por celda.
     columnas_texto = (4, 6, 7, 8, 9, 11, 12)
-    for fila in range(2, ws.max_row + 1):
+    ancho_texto = {c: anchos[get_column_letter(c)] for c in columnas_texto}
+    plantillas = {}
+    for celdas_fila in ws.iter_rows(min_row=2, max_row=ws.max_row):
         lineas = 1
-        for col in range(1, ws.max_column + 1):
-            celda = ws.cell(fila, col)
-            celda.border = Border(left=borde, right=borde, top=borde, bottom=borde)
-            if col in columnas_texto:
-                celda.alignment = Alignment(wrap_text=True, vertical="top")
-                ancho = anchos[get_column_letter(col)]
-                lineas = max(lineas, _lineas_estimadas(celda.value, ancho))
+        for col, celda in enumerate(celdas_fila, start=1):
+            plantilla = plantillas.get(col)
+            if plantilla is None:
+                celda.border = borde_completo
+                if col in ancho_texto:
+                    celda.alignment = Alignment(wrap_text=True, vertical="top")
+                else:
+                    celda.alignment = Alignment(vertical="top")
+                plantillas[col] = copy(celda._style)
             else:
-                celda.alignment = Alignment(vertical="top")
+                celda._style = plantilla  # compartido: ahorra ~100 bytes por celda
+            if col in ancho_texto:
+                lineas = max(lineas, _lineas_estimadas(celda.value, ancho_texto[col]))
         lineas = min(lineas, MAX_LINEAS_FILA)
         if lineas > 1:
-            ws.row_dimensions[fila].height = lineas * ALTO_LINEA_PT
+            ws.row_dimensions[celdas_fila[0].row].height = lineas * ALTO_LINEA_PT
 
 
 # ============================================================
@@ -1145,10 +1228,10 @@ def procesar(
         for fila in range(cols.fila_encabezado + 1, ws.max_row + 1):
             if not fila_es_valida(ws, fila, cols):
                 continue
-            valor_original = ws.cell(fila, cols.competencia).value
+            valor_original = _valor_celda(ws, fila, cols.competencia)
             codigo, frase = extraer_competencia(valor_original)
             if frase:
-                documento = ws.cell(fila, cols.documento).value
+                documento = _valor_celda(ws, fila, cols.documento)
                 filas_validas.append((fila, codigo, frase, valor_original, documento))
         datos_fichas[ficha] = filas_validas
 
@@ -1187,7 +1270,7 @@ def procesar(
     # El índice ya no se necesita (los RAP siguen referenciados desde
     # resultados_globales): se libera antes de escribir el Consolidado.
     base.indice.clear()
-    gc.collect()
+    _liberar_memoria()
 
     # 4) Escritura en el Consolidado + totales.
     total_excels_bd = len(obtener_excels_bd(carpeta_bd))
@@ -1206,12 +1289,18 @@ def procesar(
             ws.cell(cols.fila_encabezado, cols.salida[clave]).value = encabezado
         _extender_tablas_y_filtros(ws, cols)
 
+        t_hoja = time.time()
+        # Limpia las columnas de salida SOLO en celdas que ya existen (recorrer
+        # ws.max_row con ws.cell() crea celdas vacías en hojas con formato
+        # arrastrado hasta el final, y eso gastaba tiempo y RAM).
+        columnas_salida_set = set(cols.salida.values())
+        for (fila_c, col_c), celda_c in ws._cells.items():
+            if fila_c > cols.fila_encabezado and col_c in columnas_salida_set:
+                celda_c.value = None
+
         orden_por_fila = {}
-        for fila in range(cols.fila_encabezado + 1, ws.max_row + 1):
-            for col in cols.salida.values():
-                ws.cell(fila, col).value = None
-            res = resultados.get(fila)
-            if res is None:
+        for fila, res in resultados.items():
+            if fila <= cols.fila_encabezado:
                 continue
 
             ws.cell(fila, cols.estado).value = res["estado"]
@@ -1234,16 +1323,34 @@ def procesar(
                 else:
                     total_parcial += 1
 
+        t_escrito = time.time()
         reordenar_filas_por_estado(ws, orden_por_fila, cols)
+        t_reordenado = time.time()
         aplicar_formato_salida(
             ws, cols, max(orden_por_fila, default=cols.fila_encabezado)
         )
+        logger.info(
+            "Hoja '%s': %d fila(s) | escribir %.1fs, reordenar %.1fs, formato %.1fs",
+            ficha, len(orden_por_fila),
+            t_escrito - t_hoja, t_reordenado - t_escrito, time.time() - t_reordenado,
+        )
 
     _notificar(progress_callback, "Generando hoja de reporte…", total_fichas, total_fichas)
+    _liberar_memoria()
+    t = time.time()
     escribir_hoja_reporte(wb, datos_fichas, resultados_globales)
+    logger.info("Hoja de reporte generada en %.1fs", time.time() - t)
 
+    # Ya no se necesitan: se liberan antes de guardar, que es el paso que más
+    # RAM extra requiere. (Las listas/contadores del resumen siguen disponibles.)
+    del datos_fichas, resultados_globales
+    _liberar_memoria()
+
+    _notificar(progress_callback, "Guardando el archivo…", total_fichas, total_fichas)
     ruta_salida = salida_dir / "Consolidado_Procesado.xlsx"
+    t = time.time()
     wb.save(ruta_salida)
+    logger.info("Archivo guardado en %.1fs", time.time() - t)
 
     logger.info(
         "RESUMEN | total=%.1fs | fichas=%d | excels_bd=%d | filas=%d | "
