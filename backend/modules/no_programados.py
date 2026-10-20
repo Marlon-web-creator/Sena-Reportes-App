@@ -28,10 +28,12 @@ Llave de cruce Consolidado <-> export:
 Ya no se usa PyMuPDF, pytesseract ni OCR.
 """
 
+import gc
 import logging
 import math
 import os
 import re
+import sys
 import time
 import unicodedata
 from collections import Counter
@@ -44,6 +46,11 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter, range_boundaries
 from openpyxl.worksheet.table import TableColumn
 from rapidfuzz import fuzz
+
+try:
+    import resource  # solo Linux/macOS; en Windows se omite la medición de RAM
+except ImportError:  # pragma: no cover
+    resource = None
 
 # ============================================================
 # LOGGING
@@ -169,8 +176,18 @@ MOTIVOS_SIN_COINCIDENCIA = {
 ProgressCallback = Optional[Callable[[str, int, int], None]]
 
 
+def _pico_ram_mb() -> float:
+    """Pico de RAM del proceso en MB (0 si el sistema no lo permite)."""
+    if resource is None:
+        return 0.0
+    try:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # KB -> MB (Linux)
+    except Exception:
+        return 0.0
+
+
 def _notificar(callback: ProgressCallback, mensaje: str, actual: int = 0, total: int = 0):
-    logger.info("[progreso] %s (%d/%d)", mensaje, actual, total)
+    logger.info("[progreso] %s (%d/%d) | pico RAM %.0f MB", mensaje, actual, total, _pico_ram_mb())
     if callback:
         try:
             callback(mensaje, actual, total)
@@ -456,9 +473,43 @@ class ExportNoReconocido(Exception):
     pass
 
 
+class RapBD:
+    """
+    Un RAP del export de la BD. Usa __slots__ (sin __dict__ por objeto) y
+    comparte strings repetidos con sys.intern para gastar mucha menos RAM
+    que un dict por RAP. `__getitem__` permite seguir usando r["caso"],
+    r["origen"], etc., como cuando era un dict.
+    """
+    __slots__ = (
+        "id_rap", "rap", "caso", "evaluado", "programado",
+        "instructor_juicio", "instructor_programado", "notas",
+        "archivo", "hoja", "fila",
+    )
+
+    def __init__(self, id_rap, rap, caso, evaluado, programado,
+                 instructor_juicio, instructor_programado, notas,
+                 archivo, hoja, fila):
+        self.id_rap = sys.intern(id_rap)
+        self.rap = sys.intern(rap)
+        self.caso = sys.intern(caso)
+        self.evaluado = evaluado
+        self.programado = programado
+        self.instructor_juicio = sys.intern(instructor_juicio)
+        self.instructor_programado = sys.intern(instructor_programado)
+        self.notas = notas
+        self.archivo = sys.intern(archivo)
+        self.hoja = sys.intern(hoja)
+        self.fila = fila
+
+    def __getitem__(self, clave):
+        if clave == "origen":
+            return f"{self.archivo} [{self.hoja}] fila {self.fila}"
+        return getattr(self, clave)
+
+
 class BaseProgramacion:
     """
-    Índice en memoria de todos los Excels de la BD.
+    Índice en memoria de los Excels de la BD (solo las fichas del Consolidado).
 
         indice[(ficha, documento_aprendiz)][competencia_normalizada] = {
             "competencia": texto original,
@@ -538,7 +589,7 @@ def _validar_columnas_export(mapa: dict):
         )
 
 
-def _leer_hoja_export(ws, nombre_archivo: str, base: BaseProgramacion):
+def _leer_hoja_export(ws, nombre_archivo: str, base: BaseProgramacion, fichas_objetivo=None):
     try:
         ws.reset_dimensions()  # exports con dimensión mal declarada
     except Exception:
@@ -561,10 +612,13 @@ def _leer_hoja_export(ws, nombre_archivo: str, base: BaseProgramacion):
             continue
         base.filas_leidas += 1
 
-        ficha = _digitos(valor(fila, EXP_GRUPO))
+        ficha = sys.intern(_digitos(valor(fila, EXP_GRUPO)))
+        # Solo se indexan las fichas que el Consolidado realmente trae.
+        if fichas_objetivo is not None and ficha not in fichas_objetivo:
+            continue
         documento = _digitos(valor(fila, EXP_DOC_APRENDIZ))
-        competencia_original = _texto_celda(valor(fila, EXP_COMPETENCIA))
-        competencia = normalizar_texto(competencia_original)
+        competencia_original = sys.intern(_texto_celda(valor(fila, EXP_COMPETENCIA)))
+        competencia = sys.intern(normalizar_texto(competencia_original))
         id_rap = _texto_celda(valor(fila, EXP_ID_RAP))
         rap_texto = _texto_celda(valor(fila, EXP_RAP))
 
@@ -612,7 +666,7 @@ def _leer_hoja_export(ws, nombre_archivo: str, base: BaseProgramacion):
         comps = base.indice.setdefault((ficha, documento), {})
         entrada = comps.setdefault(competencia, {
             "competencia": competencia_original,
-            "id_competencia": _texto_celda(valor(fila, EXP_ID_COMPETENCIA)),
+            "id_competencia": sys.intern(_texto_celda(valor(fila, EXP_ID_COMPETENCIA))),
             "raps": {},
         })
 
@@ -621,23 +675,18 @@ def _leer_hoja_export(ws, nombre_archivo: str, base: BaseProgramacion):
             base.claves_duplicadas += 1   # se conserva la primera aparición
             continue
 
-        entrada["raps"][llave_rap] = {
-            "id_rap": id_rap,
-            "rap": rap_texto,
-            "caso": caso,
-            "evaluado": evaluado,
-            "programado": programado,
-            "instructor_juicio": instructor_juicio,
-            "instructor_programado": instructor_prog,
-            "notas": notas,
-            "origen": f"{nombre_archivo} [{ws.title}] fila {numero}",
-            "archivo": nombre_archivo,
-        }
+        entrada["raps"][llave_rap] = RapBD(
+            id_rap, rap_texto, caso, evaluado, programado,
+            instructor_juicio, instructor_prog, tuple(notas),
+            nombre_archivo, ws.title, numero,
+        )
         base.archivos_por_ficha.setdefault(ficha, set()).add(nombre_archivo)
 
 
 def cargar_base_programacion(
-    carpeta_bd: Path, progress_callback: ProgressCallback = None
+    carpeta_bd: Path,
+    progress_callback: ProgressCallback = None,
+    fichas_objetivo=None,
 ) -> BaseProgramacion:
     excels = obtener_excels_bd(carpeta_bd)
     if not excels:
@@ -661,7 +710,7 @@ def cargar_base_programacion(
         try:
             for ws in wb.worksheets:
                 try:
-                    _leer_hoja_export(ws, ruta.name, base)
+                    _leer_hoja_export(ws, ruta.name, base, fichas_objetivo)
                     base.hojas_leidas += 1
                 except ExportNoReconocido as e:
                     logger.warning("%s [%s] omitida: %s", ruta.name, ws.title, e)
@@ -1058,9 +1107,17 @@ def procesar(
 
     salida_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Base de programación (Excels de la BD).
+    # 1) Fichas del Consolidado (solo nombres de hoja, lectura liviana) y
+    #    base de programación filtrada a esas fichas.
+    wb_nombres = openpyxl.load_workbook(archivo_excel, read_only=True)
+    fichas_objetivo = {
+        _ficha_de_titulo(str(n).strip()) for n in wb_nombres.sheetnames
+    } - {""}
+    wb_nombres.close()
+    logger.info("Fichas objetivo según las hojas del Consolidado: %d", len(fichas_objetivo))
+
     _notificar(progress_callback, "Leyendo Excels de la Base de Datos…", 0, 1)
-    base = cargar_base_programacion(carpeta_bd, progress_callback)
+    base = cargar_base_programacion(carpeta_bd, progress_callback, fichas_objetivo)
 
     # 2) Consolidado: detectar columnas y filas a evaluar.
     _notificar(progress_callback, "Abriendo el Consolidado…", 0, 1)
@@ -1126,6 +1183,11 @@ def procesar(
                 f"Ficha {ficha} cruzada ({n}/{total_fichas})…", n, total_fichas,
             )
     logger.info("Cruce: %.1fs", time.time() - t)
+
+    # El índice ya no se necesita (los RAP siguen referenciados desde
+    # resultados_globales): se libera antes de escribir el Consolidado.
+    base.indice.clear()
+    gc.collect()
 
     # 4) Escritura en el Consolidado + totales.
     total_excels_bd = len(obtener_excels_bd(carpeta_bd))

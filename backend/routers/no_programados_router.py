@@ -15,6 +15,7 @@ La descarga de Excels desde Supabase Storage se hace en paralelo con
 timeout por archivo, para que un archivo colgado no bloquee todo.
 """
 
+import gc
 import logging
 import os
 import shutil
@@ -56,6 +57,20 @@ if not logger.handlers:
 router = APIRouter(prefix="/api/no-programados", tags=["No Programados"])
 
 NOMBRE_MODULO = "no_programados"
+
+# >>> Solo una ejecución a la vez: dos en paralelo duplican el pico de RAM.
+# (El candado es por proceso: asume un solo worker de uvicorn.)
+_EJECUCION_ACTIVA = threading.Lock()
+
+
+def _liberar_memoria():
+    """gc + malloc_trim para devolver al sistema la memoria que Python ya no usa."""
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)  # solo glibc (Debian/Ubuntu)
+    except Exception:
+        pass
 
 # >>> Descarga paralela y timeout por archivo
 MAX_DESCARGAS_PARALELAS = int(os.environ.get("NP_DESCARGAS_PARALELAS") or 8)
@@ -145,10 +160,20 @@ async def iniciar_procesamiento(excel: UploadFile = File(...)):
     carpeta_salida.mkdir(parents=True, exist_ok=True)
     logger.info("Carpeta temporal creada: %s", carpeta_temporal)
 
+    if not _EJECUCION_ACTIVA.acquire(blocking=False):
+        logger.warning("Ejecución %s rechazada: ya hay otra en curso.", id_ejecucion)
+        shutil.rmtree(carpeta_temporal, ignore_errors=True)
+        raise HTTPException(
+            status_code=409,
+            detail="Ya hay una ejecución en curso. Espera a que termine e inténtalo de nuevo.",
+        )
+
     try:
         ruta_excel = carpeta_entrada / Path(excel.filename).name
         t = time.time()
-        ruta_excel.write_bytes(await excel.read())
+        # Streaming a disco: no se carga el upload completo en RAM.
+        with open(ruta_excel, "wb") as destino_excel:
+            shutil.copyfileobj(excel.file, destino_excel, length=1024 * 1024)
         logger.info("Excel guardado en disco: %s (%.1fs)", ruta_excel, time.time() - t)
 
         # ------------------------------------------------------------
@@ -249,15 +274,22 @@ async def iniciar_procesamiento(excel: UploadFile = File(...)):
             id_ejecucion,
         )
         shutil.rmtree(carpeta_temporal, ignore_errors=True)
+        _EJECUCION_ACTIVA.release()
         raise
     except Exception:
         logger.exception(
             "Error preparando ejecución %s. Limpiando temporal.", id_ejecucion,
         )
         shutil.rmtree(carpeta_temporal, ignore_errors=True)
+        _EJECUCION_ACTIVA.release()
         raise
 
-    progreso.iniciar(id_ejecucion)
+    try:
+        progreso.iniciar(id_ejecucion)
+    except Exception:
+        shutil.rmtree(carpeta_temporal, ignore_errors=True)
+        _EJECUCION_ACTIVA.release()
+        raise
     logger.info("Estado de progreso inicializado para %s", id_ejecucion)
 
     def _tarea():
@@ -305,6 +337,8 @@ async def iniciar_procesamiento(excel: UploadFile = File(...)):
         finally:
             logger.info("Hilo %s: limpiando carpeta temporal", id_ejecucion)
             shutil.rmtree(carpeta_temporal, ignore_errors=True)
+            _liberar_memoria()
+            _EJECUCION_ACTIVA.release()
 
     threading.Thread(target=_tarea, daemon=True, name=f"np-{id_ejecucion}").start()
     logger.info(
