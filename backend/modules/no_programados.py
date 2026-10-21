@@ -33,10 +33,13 @@ import logging
 import math
 import os
 import re
+import shutil
 import sys
 import time
 import unicodedata
+import zipfile
 from functools import lru_cache
+from xml.sax.saxutils import escape as _xml_escape
 from collections import Counter
 from copy import copy
 from pathlib import Path
@@ -1170,6 +1173,219 @@ def escribir_hoja_reporte(wb, datos_fichas, resultados_globales):
 
 
 # ============================================================
+# HOJA "REPORTE" EN STREAMING (fuera del libro de openpyxl)
+# ============================================================
+# Antes la hoja se creaba dentro del mismo Workbook que el Consolidado: cientos
+# de miles de celdas más en RAM justo antes de wb.save(), y con instancias de
+# 512 MB el proceso moría por OOM. Ahora:
+#   1) durante el bucle de hojas, cada ficha escribe sus filas del Reporte a un
+#      archivo temporal en disco (RAM ~constante) y se liberan sus resultados;
+#   2) se guarda el Consolidado SIN la hoja Reporte y se libera el Workbook;
+#   3) la hoja Reporte se inyecta dentro del .xlsx ya guardado a nivel ZIP/XML.
+# El archivo final sigue siendo uno solo ("Consolidado_Procesado.xlsx").
+
+_REPORTE_ENCABEZADOS = [
+    "Ficha", "Fila", "Código", "Competencia (Excel)", "ID RAP", "RAP", "Caso",
+    "Instructor que emitió juicio", "Instructor programado",
+    "Coincidencia competencia", "Observación", "Archivo BD / hoja / fila",
+]
+_REPORTE_ANCHOS = [14, 8, 12, 40, 10, 55, 36, 32, 32, 20, 45, 45]
+_REPORTE_COLS_TEXTO = (3, 5, 6, 7, 8, 10, 11)  # D,F,G,H,I,K,L (0-based): con wrap
+_REPORTE_LETRAS = "ABCDEFGHIJKL"
+_XML_ILEGALES = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _xml_texto(valor) -> str:
+    texto = _XML_ILEGALES.sub("", str(valor))
+    if len(texto) > 32767:  # límite de Excel por celda
+        texto = texto[:32767]
+    return _xml_escape(texto)
+
+
+class _ReporteStream:
+    """Escribe las filas de la hoja Reporte a disco, una línea XML por fila.
+
+    Los estilos se escriben como marcadores (@H encabezado, @T texto con wrap,
+    @N sin wrap) y se resuelven al inyectar la hoja en el .xlsx final.
+    """
+
+    def __init__(self, ruta_cuerpo: Path):
+        self.ruta = Path(ruta_cuerpo)
+        self._f = open(self.ruta, "w", encoding="utf-8", newline="\n")
+        self.filas = 1
+        celdas = "".join(
+            f'<c r="{_REPORTE_LETRAS[i]}1" t="inlineStr" s="@H">'
+            f'<is><t>{_xml_texto(h)}</t></is></c>'
+            for i, h in enumerate(_REPORTE_ENCABEZADOS)
+        )
+        self._f.write(f'<row r="1" ht="30" customHeight="1">{celdas}</row>\n')
+
+    def _fila(self, valores):
+        self.filas += 1
+        r = self.filas
+        partes = []
+        lineas = 1
+        for i, v in enumerate(valores):
+            ref = f"{_REPORTE_LETRAS[i]}{r}"
+            estilo = "@T" if i in _REPORTE_COLS_TEXTO else "@N"
+            if v is None or v == "":
+                partes.append(f'<c r="{ref}" s="{estilo}"/>')
+                continue
+            if i == 1 and isinstance(v, int):  # columna "Fila": número
+                partes.append(f'<c r="{ref}" s="{estilo}"><v>{v}</v></c>')
+                continue
+            texto = str(v)
+            partes.append(
+                f'<c r="{ref}" t="inlineStr" s="{estilo}">'
+                f'<is><t xml:space="preserve">{_xml_texto(texto)}</t></is></c>'
+            )
+            if i in _REPORTE_COLS_TEXTO:
+                lineas = max(lineas, _lineas_estimadas(texto, _REPORTE_ANCHOS[i]))
+        lineas = min(lineas, MAX_LINEAS_FILA)
+        alto = f' ht="{lineas * ALTO_LINEA_PT:g}" customHeight="1"' if lineas > 1 else ""
+        self._f.write(f'<row r="{r}"{alto}>{"".join(partes)}</row>\n')
+
+    def agregar_ficha(self, ficha, filas_validas, resultados):
+        for fila, codigo, frase, valor_original, documento in filas_validas:
+            res = resultados.get(fila)
+            if res is None:
+                continue
+            if not res["raps"]:
+                self._fila([
+                    ficha, fila, codigo or "", valor_original, "", "",
+                    res["estado"], "", "", "", res["observacion"], "",
+                ])
+                continue
+            for r in res["raps"]:
+                self._fila([
+                    ficha, fila, codigo or "", valor_original, r["id_rap"], r["rap"],
+                    r["caso"], r["instructor_juicio"], r["instructor_programado"],
+                    res["coincidencia"], res["observacion"], r["origen"],
+                ])
+
+    def cerrar(self) -> int:
+        if not self._f.closed:
+            self._f.close()
+        return self.filas
+
+
+def _agregar_a_seccion(xml: str, etiqueta: str, nuevos: list):
+    """Agrega elementos al final de <etiqueta count=N> y devuelve (xml, N_anterior)."""
+    m = re.search(rf'<{etiqueta}\b[^>]*?\bcount="(\d+)"[^>]*>', xml)
+    if not m or m.group(0).endswith("/>"):
+        raise ValueError(f"styles.xml: sección <{etiqueta}> no utilizable")
+    base = int(m.group(1))
+    cierre = xml.index(f"</{etiqueta}>", m.end())
+    tag = m.group(0).replace(f'count="{base}"', f'count="{base + len(nuevos)}"', 1)
+    xml = xml[:m.start()] + tag + xml[m.end():cierre] + "".join(nuevos) + xml[cierre:]
+    return xml, base
+
+
+def _anexar_hoja_reporte(ruta_xlsx: Path, ruta_cuerpo: Path, n_filas: int):
+    """Inyecta la hoja 'Reporte' (cuerpo ya en disco) dentro de un .xlsx guardado.
+
+    Copia el ZIP entrada por entrada en bloques (RAM mínima) y solo modifica
+    workbook.xml, sus rels, [Content_Types].xml y styles.xml. Escribe a un
+    temporal y reemplaza el original solo si todo salió bien.
+    """
+    ruta_xlsx = Path(ruta_xlsx)
+    tmp = ruta_xlsx.with_suffix(".tmp.xlsx")
+    parte = "xl/worksheets/sheetReporte.xml"
+    ns_r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    try:
+        with zipfile.ZipFile(ruta_xlsx) as zin:
+            if parte in zin.namelist():
+                raise ValueError("ya existe la parte sheetReporte.xml")
+            wbxml = zin.read("xl/workbook.xml").decode("utf-8")
+            rels = zin.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+            ctyp = zin.read("[Content_Types].xml").decode("utf-8")
+            estilos = zin.read("xl/styles.xml").decode("utf-8")
+
+            sheet_id = max([int(x) for x in re.findall(r'sheetId="(\d+)"', wbxml)] or [0]) + 1
+            rid = "rId%d" % (max([int(x) for x in re.findall(r'Id="rId(\d+)"', rels)] or [0]) + 1)
+
+            if "</sheets>" not in wbxml or "</Relationships>" not in rels or "</Types>" not in ctyp:
+                raise ValueError("estructura OOXML inesperada")
+            wbxml = wbxml.replace(
+                "</sheets>",
+                f'<sheet xmlns:r="{ns_r}" name="Reporte" sheetId="{sheet_id}" r:id="{rid}"/></sheets>', 1)
+            rels = rels.replace(
+                "</Relationships>",
+                f'<Relationship Id="{rid}" Type="{ns_r}/worksheet" Target="/{parte}"/></Relationships>', 1)
+            ctyp = ctyp.replace(
+                "</Types>",
+                f'<Override PartName="/{parte}" ContentType="application/vnd.openxmlformats-'
+                f'officedocument.spreadsheetml.worksheet+xml"/></Types>', 1)
+
+            # Estilos nuevos al final de fonts / fills / borders / cellXfs.
+            fuente = ('<font><b/><sz val="11"/><color rgb="FFFFFFFF"/>'
+                      '<name val="Calibri"/><family val="2"/></font>')
+            relleno = ('<fill><patternFill patternType="solid"><fgColor rgb="FF1F4E78"/>'
+                       '<bgColor indexed="64"/></patternFill></fill>')
+            lado = '<{0} style="thin"><color rgb="FF808080"/></{0}>'
+            borde = ("<border>" + "".join(lado.format(x) for x in ("left", "right", "top", "bottom"))
+                     + "<diagonal/></border>")
+            estilos, f_id = _agregar_a_seccion(estilos, "fonts", [fuente])
+            estilos, l_id = _agregar_a_seccion(estilos, "fills", [relleno])
+            estilos, b_id = _agregar_a_seccion(estilos, "borders", [borde])
+            xf_h = (f'<xf numFmtId="0" fontId="{f_id}" fillId="{l_id}" borderId="{b_id}" xfId="0" '
+                    'applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'
+                    '<alignment horizontal="center" vertical="center" wrapText="1"/></xf>')
+            xf_t = (f'<xf numFmtId="0" fontId="0" fillId="0" borderId="{b_id}" xfId="0" '
+                    'applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>')
+            xf_n = (f'<xf numFmtId="0" fontId="0" fillId="0" borderId="{b_id}" xfId="0" '
+                    'applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>')
+            estilos, x0 = _agregar_a_seccion(estilos, "cellXfs", [xf_h, xf_t, xf_n])
+            marcas = {b's="@H"': f's="{x0}"'.encode(),
+                      b's="@T"': f's="{x0 + 1}"'.encode(),
+                      b's="@N"': f's="{x0 + 2}"'.encode()}
+
+            cols = "".join(
+                f'<col min="{i + 1}" max="{i + 1}" width="{w}" customWidth="1"/>'
+                for i, w in enumerate(_REPORTE_ANCHOS)
+            )
+            cabecera = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                '<sheetViews><sheetView workbookViewId="0">'
+                '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
+                '<selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>'
+                f'<sheetFormatPr defaultRowHeight="15"/><cols>{cols}</cols><sheetData>\n'
+            ).encode("utf-8")
+            cola = (f'</sheetData><autoFilter ref="A1:{_REPORTE_LETRAS[-1]}{max(n_filas, 1)}"/>'
+                    '</worksheet>').encode("utf-8")
+
+            reemplazos = {
+                "xl/workbook.xml": wbxml,
+                "xl/_rels/workbook.xml.rels": rels,
+                "[Content_Types].xml": ctyp,
+                "xl/styles.xml": estilos,
+            }
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    if item.filename in reemplazos:
+                        zout.writestr(item.filename, reemplazos[item.filename].encode("utf-8"))
+                    else:
+                        with zin.open(item) as origen, zout.open(item.filename, "w") as destino:
+                            shutil.copyfileobj(origen, destino, 1 << 20)
+                with zout.open(parte, "w") as destino:
+                    destino.write(cabecera)
+                    with open(ruta_cuerpo, "rb") as cuerpo:
+                        for linea in cuerpo:  # una fila por línea: los marcadores no se parten
+                            for marca, real in marcas.items():
+                                linea = linea.replace(marca, real)
+                            destino.write(linea)
+                    destino.write(cola)
+        os.replace(tmp, ruta_xlsx)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+# ============================================================
 # PROCESO PRINCIPAL
 # ============================================================
 
@@ -1270,10 +1486,22 @@ def procesar(
     # El índice ya no se necesita (los RAP siguen referenciados desde
     # resultados_globales): se libera antes de escribir el Consolidado.
     base.indice.clear()
+    for _fn in (_normalizar_str, _instructor_valido):  # cachés lru de texto
+        _cc = getattr(_fn, "cache_clear", None)
+        if _cc:
+            _cc()
     _liberar_memoria()
 
     # 4) Escritura en el Consolidado + totales.
     total_excels_bd = len(obtener_excels_bd(carpeta_bd))
+
+    # Un 'Reporte' de una ejecución anterior se elimina del libro; el nuevo se
+    # escribe en streaming a disco y se inyecta después de guardar.
+    for _ws_prev in [w for w in wb.worksheets if str(w.title).strip().lower() == "reporte"]:
+        wb.remove(_ws_prev)
+    _ws_prev = None
+    ruta_cuerpo_reporte = salida_dir / "reporte_cuerpo.tmp"
+    reporte = _ReporteStream(ruta_cuerpo_reporte)
     raps_por_caso = Counter()
     total_programado = total_no_programado = total_parcial = total_sin_coincidencia = 0
     total_filas = 0
@@ -1335,22 +1563,51 @@ def procesar(
             t_escrito - t_hoja, t_reordenado - t_escrito, time.time() - t_reordenado,
         )
 
-    _notificar(progress_callback, "Generando hoja de reporte…", total_fichas, total_fichas)
-    _liberar_memoria()
-    t = time.time()
-    escribir_hoja_reporte(wb, datos_fichas, resultados_globales)
-    logger.info("Hoja de reporte generada en %.1fs", time.time() - t)
+        # Reporte en streaming y liberación inmediata de los datos de esta ficha.
+        reporte.agregar_ficha(ficha, datos_fichas.pop(ficha, []), resultados)
+        resultados_globales.pop(ficha, None)
+        resultados = orden_por_fila = None
 
-    # Ya no se necesitan: se liberan antes de guardar, que es el paso que más
-    # RAM extra requiere. (Las listas/contadores del resumen siguen disponibles.)
-    del datos_fichas, resultados_globales
+    n_filas_reporte = reporte.cerrar()
+    datos_fichas.clear()
+    resultados_globales.clear()
     _liberar_memoria()
 
     _notificar(progress_callback, "Guardando el archivo…", total_fichas, total_fichas)
     ruta_salida = salida_dir / "Consolidado_Procesado.xlsx"
     t = time.time()
     wb.save(ruta_salida)
-    logger.info("Archivo guardado en %.1fs", time.time() - t)
+    logger.info(
+        "Archivo guardado en %.1fs | RAM %.0f MB (pico %.0f MB)",
+        time.time() - t, _ram_actual_mb(), _pico_ram_mb(),
+    )
+
+    # Se libera el libro completo ANTES de generar el Reporte. Hay que soltar
+    # también las variables de bucle: cada Worksheet/Cell referencia al Workbook.
+    ws = celda_c = None
+    columnas_por_ficha.clear()
+    del wb
+    _liberar_memoria()
+
+    _notificar(progress_callback, "Agregando hoja de reporte…", total_fichas, total_fichas)
+    t = time.time()
+    reporte_ok = False
+    try:
+        _anexar_hoja_reporte(ruta_salida, ruta_cuerpo_reporte, n_filas_reporte)
+        reporte_ok = True
+        logger.info(
+            "Hoja de reporte agregada en %.1fs (%d filas)", time.time() - t, n_filas_reporte - 1
+        )
+    except Exception:
+        logger.exception(
+            "No se pudo agregar la hoja Reporte; se entrega el archivo sin ella"
+        )
+    finally:
+        try:
+            ruta_cuerpo_reporte.unlink()
+        except OSError:
+            pass
+    _liberar_memoria()
 
     logger.info(
         "RESUMEN | total=%.1fs | fichas=%d | excels_bd=%d | filas=%d | "
@@ -1363,6 +1620,7 @@ def procesar(
 
     return {
         "archivo_generado": str(ruta_salida),
+        "hoja_reporte_generada": reporte_ok,
         "total_fichas": total_fichas,
         "total_filas": total_filas,
         "total_excels_bd": total_excels_bd,
