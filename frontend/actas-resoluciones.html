@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Actas y Resoluciones · SENA Nexus</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.css" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&display=swap" />
+    <style>
+      :root { --ar-green:#39a900; --ar-dark:#1f4e2c; --ar-bg:#f4f7f4; --ar-card:#fff; --ar-line:#dfe6df; --ar-txt:#26332a; --ar-mut:#6b7a6f; --ar-red:#c0392b; --ar-amber:#b9770e; --ar-blue:#2471a3; }
+      * { box-sizing: border-box; }
+      body.ar-page { margin:0; font-family:"Nunito",system-ui,sans-serif; background:var(--ar-bg); color:var(--ar-txt); }
+      .ar-top { display:flex; align-items:center; gap:16px; padding:14px 28px; background:var(--ar-card); border-bottom:1px solid var(--ar-line); }
+      .ar-top a { color:var(--ar-dark); text-decoration:none; font-weight:700; }
+      .ar-top h1 { margin:0; font-size:1.25rem; }
+      .ar-wrap { max-width:900px; margin:28px auto; padding:0 20px; display:grid; gap:20px; }
+      .ar-card { background:var(--ar-card); border:1px solid var(--ar-line); border-radius:14px; padding:22px; }
+      .ar-card h2 { margin:0 0 6px; font-size:1.05rem; }
+      .ar-card p.ar-help { margin:0 0 14px; color:var(--ar-mut); font-size:.92rem; line-height:1.45; }
+      .ar-drop { border:2px dashed var(--ar-line); border-radius:12px; padding:30px 16px; text-align:center; cursor:pointer; transition:.15s; }
+      .ar-drop:hover, .ar-drop.ar-over { border-color:var(--ar-green); background:#f0f9ea; }
+      .ar-drop strong { display:block; margin-bottom:4px; }
+      .ar-drop small { color:var(--ar-mut); }
+      .ar-file { margin-top:10px; font-weight:700; color:var(--ar-dark); word-break:break-all; }
+      .ar-btn { margin-top:16px; background:var(--ar-green); color:#fff; border:0; border-radius:10px; padding:11px 22px; font:inherit; font-weight:800; cursor:pointer; }
+      .ar-btn:disabled { background:#b7c5b7; cursor:not-allowed; }
+      .ar-btn.ar-sec { background:var(--ar-dark); text-decoration:none; display:inline-block; }
+      .ar-bar { height:12px; background:#e6ece6; border-radius:99px; overflow:hidden; margin:12px 0 8px; }
+      .ar-bar > div { height:100%; width:0; background:var(--ar-green); transition:width .3s; }
+      .ar-bar.ar-ind > div { width:35%; animation:ar-slide 1.2s infinite ease-in-out; }
+      @keyframes ar-slide { 0%{margin-left:-35%} 100%{margin-left:100%} }
+      .ar-msg { color:var(--ar-mut); font-size:.92rem; }
+      .ar-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin:14px 0; }
+      .ar-stat { border:1px solid var(--ar-line); border-radius:12px; padding:12px 14px; }
+      .ar-stat b { display:block; font-size:1.7rem; line-height:1.1; }
+      .ar-stat span { font-size:.82rem; color:var(--ar-mut); }
+      .ar-stat.ar-r b { color:var(--ar-red); } .ar-stat.ar-a b { color:var(--ar-amber); } .ar-stat.ar-b b { color:var(--ar-blue); }
+      .ar-warn { background:#fff8e6; border:1px solid #f1d98c; border-radius:10px; padding:10px 14px; margin-top:10px; font-size:.9rem; }
+      .ar-warn ul { margin:6px 0 0 18px; padding:0; }
+      .ar-err { background:#fdecea; border:1px solid #f1b3ab; color:#7b241c; border-radius:10px; padding:12px 14px; }
+      .ar-hide { display:none !important; }
+      .ar-note { font-size:.85rem; color:var(--ar-mut); margin-top:10px; line-height:1.5; }
+    </style>
+  </head>
+  <body class="ar-page">
+    <header class="ar-top">
+      <a href="index.html">← Inicio</a>
+      <h1>Actas y Resoluciones</h1>
+    </header>
+
+    <main class="ar-wrap">
+      <section class="ar-card" id="ar-form-card">
+        <h2>1. Sube el consolidado</h2>
+        <p class="ar-help">
+          La app lee todos los PDFs de la Base de Datos con módulo
+          <b>"Actas y Resoluciones"</b> y agrega al consolidado las columnas
+          <b>ESTADO REAL</b> y <b>OBSERVACIÓN ACTAS/RESOLUCIONES</b>.
+        </p>
+        <div class="ar-drop" id="ar-drop" tabindex="0" role="button" aria-label="Seleccionar consolidado">
+          <strong>Arrastra el consolidado aquí o haz clic para elegirlo</strong>
+          <small>Excel .xlsx o .xlsm</small>
+          <div class="ar-file" id="ar-file"></div>
+        </div>
+        <input type="file" id="ar-input" accept=".xlsx,.xlsm" hidden />
+        <button class="ar-btn" id="ar-run" disabled>Procesar</button>
+        <p class="ar-note">
+          Los PDFs se gestionan en <a href="base-datos.html">Base de datos</a>
+          (módulo "Actas y Resoluciones"). Solo se leen archivos .pdf.
+        </p>
+      </section>
+
+      <section class="ar-card ar-hide" id="ar-progress-card">
+        <h2>2. Procesando…</h2>
+        <div class="ar-bar ar-ind" id="ar-bar"><div id="ar-bar-fill"></div></div>
+        <div class="ar-msg" id="ar-msg">Iniciando…</div>
+      </section>
+
+      <section class="ar-card ar-hide" id="ar-error-card">
+        <h2>No se pudo procesar</h2>
+        <div class="ar-err" id="ar-error"></div>
+        <button class="ar-btn" id="ar-retry">Intentar de nuevo</button>
+      </section>
+
+      <section class="ar-card ar-hide" id="ar-result-card">
+        <h2>3. Resultado</h2>
+        <div class="ar-stats" id="ar-stats"></div>
+        <div id="ar-warns"></div>
+        <a class="ar-btn ar-sec" id="ar-download" href="#">Descargar Excel</a>
+        <button class="ar-btn" id="ar-again" style="margin-left:8px">Procesar otro</button>
+        <p class="ar-note">
+          En el Excel, la hoja <b>"Evidencias PDF"</b> lista cada hallazgo con archivo, página y fragmento.
+          Las filas marcadas <b>REVISAR</b> (azul) no cambian el estado: requieren verificación manual.
+        </p>
+      </section>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/toastify-js/1.12.0/toastify.min.js"></script>
+    <script src="js/actas-resoluciones.js"></script>
+    <script src="/js/chatbot.js" defer></script>
+  </body>
+</html>
