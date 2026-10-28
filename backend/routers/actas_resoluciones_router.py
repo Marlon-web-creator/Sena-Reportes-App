@@ -58,7 +58,7 @@ NOMBRE_MODULO = "actas_resoluciones"
 # con "_"; listar_archivos_por_modulo normaliza espacios y guiones).
 MODULOS_ACEPTADOS = ("actas_y_resoluciones", "actas_resoluciones", "actas_y_resolucion")
 
-MAX_DESCARGAS_PARALELAS = int(os.environ.get("AR_DESCARGAS_PARALELAS") or 8)
+MAX_DESCARGAS_PARALELAS = int(os.environ.get("AR_DESCARGAS_PARALELAS") or 2)
 # Los PDFs pesan más que los Excels: margen más amplio por archivo.
 TIMEOUT_DESCARGA_POR_ARCHIVO = float(os.environ.get("AR_TIMEOUT_DESCARGA") or 90)
 

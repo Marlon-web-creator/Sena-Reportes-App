@@ -59,8 +59,10 @@ Solo se leen PDFs. Otros archivos con el mismo módulo se ignoran.
 
 from __future__ import annotations
 
+import gc
 import os
 import re
+import time
 import unicodedata
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -92,9 +94,11 @@ LARGO_FRAGMENTO = 220            # caracteres del fragmento citado
 MAX_EVIDENCIAS_EN_OBSERVACION = 3
 MIN_CARACTERES_PAGINA = 30       # menos que esto = página sin texto (¿escaneada?)
 OCR_ACTIVO = (os.environ.get("AR_OCR", "1") != "0")
-OCR_MAX_PAGINAS_POR_PDF = int(os.environ.get("AR_OCR_MAX_PAGINAS") or 400)
-OCR_ESCALA = float(os.environ.get("AR_OCR_ESCALA") or 2.5)      # resolución al rasterizar páginas
-OCR_HILOS = int(os.environ.get("AR_OCR_HILOS") or min(4, os.cpu_count() or 2))
+# Valores pensados para el plan gratuito de Render (512 MB). Se pueden subir por variable de entorno.
+OCR_MAX_PAGINAS_POR_PDF = int(os.environ.get("AR_OCR_MAX_PAGINAS") or 150)
+OCR_MAX_SEGUNDOS_POR_PDF = int(os.environ.get("AR_OCR_MAX_SEGUNDOS_PDF") or 300)
+OCR_ESCALA = float(os.environ.get("AR_OCR_ESCALA") or 2.0)      # resolución al rasterizar páginas
+OCR_HILOS = int(os.environ.get("AR_OCR_HILOS") or 1)
 OCR_TIMEOUT_PAGINA = int(os.environ.get("AR_OCR_TIMEOUT") or 120)  # segundos por página
 # Tesseract usa varios hilos por proceso; como OCR_HILOS ya paraleliza, se limita a 1.
 os.environ.setdefault("OMP_THREAD_LIMIT", "1")
@@ -459,7 +463,7 @@ def _abrir_renderizador(ruta: Path):
         d = pypdfium2.PdfDocument(str(ruta))
 
         def render(i: int):
-            return d[i].render(scale=OCR_ESCALA).to_pil()
+            return d[i].render(scale=OCR_ESCALA, grayscale=True).to_pil()
 
         return render, d.close
     except Exception:
@@ -473,8 +477,9 @@ def _abrir_renderizador(ruta: Path):
             d.authenticate("")
 
         def render(i: int):
-            pix = d[i].get_pixmap(matrix=fitz.Matrix(OCR_ESCALA, OCR_ESCALA), alpha=False)
-            return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            pix = d[i].get_pixmap(matrix=fitz.Matrix(OCR_ESCALA, OCR_ESCALA), alpha=False,
+                                  colorspace=fitz.csGRAY)
+            return Image.frombytes("L", (pix.width, pix.height), pix.samples)
 
         return render, d.close
     except Exception:
@@ -518,10 +523,13 @@ def _texto_paginas(ruta: Path, est: dict) -> list[tuple[int, str]]:
         if ocr and rend:
             render, cerrar = rend
             pendientes = sin_texto[:OCR_MAX_PAGINAS_POR_PDF]
-            lote_n = max(1, OCR_HILOS) * 2
+            lote_n = max(1, OCR_HILOS)
+            t_ini = time.time()
             try:
                 with ThreadPoolExecutor(max_workers=max(1, OCR_HILOS), thread_name_prefix="ar-ocr") as pool:
                     for k in range(0, len(pendientes), lote_n):
+                        if time.time() - t_ini > OCR_MAX_SEGUNDOS_POR_PDF:
+                            break  # el resto de páginas queda sin leer (se cuentan como "sin texto")
                         imgs = []
                         for i in pendientes[k:k + lote_n]:
                             try:
@@ -899,6 +907,7 @@ def procesar(
         except Exception as e:  # cifrado, corrupto, etc.
             pdfs_omitidos.append({"archivo": ruta.name, "motivo": f"no se pudo leer ({type(e).__name__}: {e})"})
             continue
+        gc.collect()
         pdfs_usados.append(ruta.name)
         for e in evs:
             evidencias_por_doc[e.doc].append(e)
