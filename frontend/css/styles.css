@@ -1824,3 +1824,41 @@ img, svg { max-width: 100%; }
   #cb-root .cb-boton:hover,
   #cb-root .cb-enviar:hover:not(:disabled) { transform: none; }
 }
+/* ---------- 12. Actas y Resoluciones (solo lo que no existía) ---------- */
+
+/* Ocultar/mostrar tarjetas (lo alterna actas-resoluciones.js) */
+.ar-hide { display: none !important; }
+
+/* Zona de arrastre del consolidado */
+.ar-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 28px 20px;
+  background: var(--bg-well);
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+}
+.ar-drop small { color: var(--text-dim); font-size: 0.8rem; }
+.ar-drop:hover,
+.ar-drop:focus-visible,
+.ar-drop.ar-over,
+.ar-drop.drag,
+.ar-drop.dragover {
+  border-color: var(--accent);
+  background: var(--panel-raised);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.ar-drop .file-list { margin: 8px 0 0; color: var(--accent-bright); font-size: 0.83rem; }
+.ar-drop .file-list:empty { display: none; }
+
+/* Barra indeterminada mientras no hay porcentaje real */
+.ar-ind .barra-progreso { width: 40%; animation: stripes 0.8s linear infinite; }
+
+/* Margen del bloque de advertencias que inyecta el JS */
+#ar-warns:not(:empty) { margin: 16px 0; }
