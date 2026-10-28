@@ -63,6 +63,7 @@ import os
 import re
 import unicodedata
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,7 +92,12 @@ LARGO_FRAGMENTO = 220            # caracteres del fragmento citado
 MAX_EVIDENCIAS_EN_OBSERVACION = 3
 MIN_CARACTERES_PAGINA = 30       # menos que esto = página sin texto (¿escaneada?)
 OCR_ACTIVO = (os.environ.get("AR_OCR", "1") != "0")
-OCR_MAX_PAGINAS_POR_PDF = int(os.environ.get("AR_OCR_MAX_PAGINAS") or 60)
+OCR_MAX_PAGINAS_POR_PDF = int(os.environ.get("AR_OCR_MAX_PAGINAS") or 400)
+OCR_ESCALA = float(os.environ.get("AR_OCR_ESCALA") or 2.5)      # resolución al rasterizar páginas
+OCR_HILOS = int(os.environ.get("AR_OCR_HILOS") or min(4, os.cpu_count() or 2))
+OCR_TIMEOUT_PAGINA = int(os.environ.get("AR_OCR_TIMEOUT") or 120)  # segundos por página
+# Tesseract usa varios hilos por proceso; como OCR_HILOS ya paraleliza, se limita a 1.
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 
 # ------------------------------------------------------------
 # Categorías. Para agregar una (p. ej. "RETIRO VOLUNTARIO") basta con añadir
@@ -132,7 +138,7 @@ _ESTADO_BASE_TERMINAL = re.compile(r"CANCEL|RETIR|DESERC|CERTIF|EGRES|TRASLAD|GR
 
 _PARTICULAS = {"DE", "DEL", "LA", "LAS", "LOS", "Y", "SAN", "SANTA"}
 
-_RE_MILES = re.compile(r"(?<!\d)\d{1,3}(?:[. ]\d{3}){2,3}(?!\d)")
+_RE_MILES = re.compile(r"(?<!\d)\d{1,3}(?:[., ]\d{3}){2,3}(?!\d)")
 _RE_NUMERO = re.compile(r"(?<!\d)\d{6,11}(?!\d)")
 _RE_PALABRA = re.compile(r"[A-Z]{2,}")
 
@@ -188,7 +194,7 @@ def _normalizar_documento(valor) -> Optional[str]:
 
 def _limpiar_digitos(linea: str) -> str:
     """'1.011.323.490' / '1 011 323 490' -> '1011323490' (solo grupos de miles)."""
-    return _RE_MILES.sub(lambda m: re.sub(r"[. ]", "", m.group(0)), linea)
+    return _RE_MILES.sub(lambda m: re.sub(r"[., ]", "", m.group(0)), linea)
 
 
 def _clasificar(texto_norm: str) -> tuple[dict[str, list[str]], bool]:
@@ -336,6 +342,7 @@ _OCR_LISTO = None  # None = sin probar; False = no disponible; tupla = disponibl
 
 
 def _preparar_ocr():
+    """(pytesseract, None, idioma) si pytesseract + el binario tesseract funcionan; si no, False."""
     global _OCR_LISTO
     if _OCR_LISTO is not None:
         return _OCR_LISTO
@@ -343,63 +350,205 @@ def _preparar_ocr():
         _OCR_LISTO = False
         return False
     try:
-        import pypdfium2
         import pytesseract
-        langs = set(pytesseract.get_languages(config=""))
+        langs = set(pytesseract.get_languages(config=""))  # falla si no está el binario
         if "spa" in langs and "eng" in langs:
             lang = "spa+eng"
         elif "spa" in langs:
             lang = "spa"
         else:
             lang = "eng"
-        _OCR_LISTO = (pytesseract, pypdfium2, lang)
+        _OCR_LISTO = (pytesseract, None, lang)
     except Exception:
         _OCR_LISTO = False
     return _OCR_LISTO
 
 
-def _texto_paginas(ruta: Path, est: dict) -> list[tuple[int, str]]:
+# ---- Lectores de texto digital. Se prueban en orden y se usa el primero que
+# ---- devuelva texto; cada uno es opcional (si no está instalado, se salta).
+
+def _texto_pdfplumber(ruta: Path) -> list[str]:
     import pdfplumber
 
-    paginas: list[tuple[int, str]] = []
-    ocr = None
-    doc_pdfium = None
-    ocr_usadas = 0
-    try:
-        with pdfplumber.open(str(ruta)) as pdf:
-            for i, page in enumerate(pdf.pages):
-                try:
-                    texto = page.extract_text() or ""
-                except Exception:
-                    texto = ""
-                if len(texto.strip()) < MIN_CARACTERES_PAGINA:
-                    if ocr is None:
-                        ocr = _preparar_ocr()
-                    if ocr and ocr_usadas < OCR_MAX_PAGINAS_POR_PDF:
-                        try:
-                            if doc_pdfium is None:
-                                doc_pdfium = ocr[1].PdfDocument(str(ruta))
-                            img = doc_pdfium[i].render(scale=2.5).to_pil()
-                            texto = ocr[0].image_to_string(img, lang=ocr[2], config="--psm 6")
-                            ocr_usadas += 1
-                            est["paginas_ocr"] += 1
-                        except Exception:
-                            pass
-                    if len(texto.strip()) < MIN_CARACTERES_PAGINA:
-                        est["paginas_sin_texto"] += 1
-                est["paginas_total"] += 1
-                paginas.append((i + 1, texto))
-                try:
-                    page.flush_cache()
-                except Exception:
-                    pass
-    finally:
-        if doc_pdfium is not None:
+    out: list[str] = []
+    with pdfplumber.open(str(ruta)) as pdf:
+        for page in pdf.pages:
             try:
-                doc_pdfium.close()
+                out.append(page.extract_text() or "")
+            except Exception:
+                out.append("")
+            try:
+                page.flush_cache()
             except Exception:
                 pass
-    return paginas
+    return out
+
+
+def _texto_pypdfium2(ruta: Path) -> list[str]:
+    import pypdfium2
+
+    pdf = pypdfium2.PdfDocument(str(ruta))
+    out: list[str] = []
+    try:
+        for i in range(len(pdf)):
+            page = pdf[i]
+            try:
+                tp = page.get_textpage()
+                try:
+                    t = tp.get_text_range() or ""
+                finally:
+                    tp.close()
+            except Exception:
+                t = ""
+            out.append(t.replace("\r\n", "\n").replace("\r", "\n"))
+            try:
+                page.close()
+            except Exception:
+                pass
+    finally:
+        pdf.close()
+    return out
+
+
+def _texto_pypdf(ruta: Path) -> list[str]:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        from PyPDF2 import PdfReader
+
+    lector = PdfReader(str(ruta))
+    if getattr(lector, "is_encrypted", False):
+        try:
+            lector.decrypt("")
+        except Exception:
+            pass
+    out: list[str] = []
+    for p in lector.pages:
+        try:
+            out.append(p.extract_text() or "")
+        except Exception:
+            out.append("")
+    return out
+
+
+def _texto_fitz(ruta: Path) -> list[str]:
+    import fitz  # PyMuPDF
+
+    d = fitz.open(str(ruta))
+    try:
+        if getattr(d, "needs_pass", False):
+            d.authenticate("")
+        return [p.get_text("text") or "" for p in d]
+    finally:
+        d.close()
+
+
+_EXTRACTORES = (
+    ("pdfplumber", _texto_pdfplumber),
+    ("pypdfium2", _texto_pypdfium2),
+    ("pypdf", _texto_pypdf),
+    ("pymupdf", _texto_fitz),
+)
+
+
+def _abrir_renderizador(ruta: Path):
+    """(render(i) -> imagen PIL, cerrar) usando pypdfium2 o PyMuPDF; None si no hay ninguno."""
+    try:
+        import pypdfium2
+
+        d = pypdfium2.PdfDocument(str(ruta))
+
+        def render(i: int):
+            return d[i].render(scale=OCR_ESCALA).to_pil()
+
+        return render, d.close
+    except Exception:
+        pass
+    try:
+        import fitz
+        from PIL import Image
+
+        d = fitz.open(str(ruta))
+        if getattr(d, "needs_pass", False):
+            d.authenticate("")
+
+        def render(i: int):
+            pix = d[i].get_pixmap(matrix=fitz.Matrix(OCR_ESCALA, OCR_ESCALA), alpha=False)
+            return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+        return render, d.close
+    except Exception:
+        return None
+
+
+def _ocr_imagen(ocr, img) -> str:
+    from PIL import ImageOps
+
+    gris = ImageOps.autocontrast(img.convert("L"))
+    return ocr[0].image_to_string(gris, lang=ocr[2], config="--psm 6", timeout=OCR_TIMEOUT_PAGINA)
+
+
+def _texto_paginas(ruta: Path, est: dict) -> list[tuple[int, str]]:
+    """
+    Texto de cada página: primero la capa de texto (PDF digital) con el primer
+    lector que funcione; las páginas que quedan sin texto (escaneadas / solo
+    imagen) se pasan por OCR. Así un mismo PDF puede ser mixto.
+    Lanza RuntimeError (con el detalle de cada lector) si ninguno pudo abrir el PDF.
+    """
+    textos: Optional[list[str]] = None
+    errores: list[str] = []
+    for nombre, fn in _EXTRACTORES:
+        try:
+            r = fn(ruta)
+        except Exception as e:
+            errores.append(f"{nombre}: {type(e).__name__}: {e}")
+            continue
+        if textos is None or sum(len(t.strip()) for t in r) > sum(len(t.strip()) for t in textos):
+            textos = r
+        if sum(len(t.strip()) for t in r) >= MIN_CARACTERES_PAGINA:
+            break
+    if textos is None:
+        raise RuntimeError("; ".join(errores) or "no hay ningún lector de PDF instalado")
+
+    # --- OCR de las páginas sin texto
+    sin_texto = [i for i, t in enumerate(textos) if len(t.strip()) < MIN_CARACTERES_PAGINA]
+    if sin_texto:
+        ocr = _preparar_ocr()
+        rend = _abrir_renderizador(ruta) if ocr else None
+        if ocr and rend:
+            render, cerrar = rend
+            pendientes = sin_texto[:OCR_MAX_PAGINAS_POR_PDF]
+            lote_n = max(1, OCR_HILOS) * 2
+            try:
+                with ThreadPoolExecutor(max_workers=max(1, OCR_HILOS), thread_name_prefix="ar-ocr") as pool:
+                    for k in range(0, len(pendientes), lote_n):
+                        imgs = []
+                        for i in pendientes[k:k + lote_n]:
+                            try:
+                                imgs.append((i, render(i)))
+                            except Exception:
+                                pass
+                        futs = [(i, pool.submit(_ocr_imagen, ocr, img)) for i, img in imgs]
+                        for i, f in futs:
+                            try:
+                                t = f.result()
+                            except Exception:
+                                continue
+                            if len(t.strip()) > len(textos[i].strip()):
+                                textos[i] = t
+                                est["paginas_ocr"] += 1
+                        del imgs, futs
+            finally:
+                try:
+                    cerrar()
+                except Exception:
+                    pass
+
+    for t in textos:
+        est["paginas_total"] += 1
+        if len(t.strip()) < MIN_CARACTERES_PAGINA:
+            est["paginas_sin_texto"] += 1
+    return [(i + 1, t) for i, t in enumerate(textos)]
 
 
 def _tipo_y_titulo(paginas: list[tuple[int, str]], nombre_archivo: str,
@@ -756,11 +905,19 @@ def procesar(
         todas.extend(evs)
 
     if not pdfs_usados:
-        raise ValueError("No se pudo leer ninguno de los PDFs de la Base de Datos.")
-    if est["paginas_total"] and est["paginas_sin_texto"] == est["paginas_total"]:
+        motivos = " | ".join(f"{o['archivo']} -> {o['motivo']}" for o in pdfs_omitidos[:3])
         raise ValueError(
-            "Los PDFs no tienen texto seleccionable (parecen escaneados) y el OCR no está disponible. "
-            "Instala tesseract + pytesseract + pypdfium2 o sube PDFs con texto."
+            f"No se pudo leer ninguno de los PDFs de la Base de Datos ({len(pdfs_omitidos)} fallaron). "
+            f"Detalle: {motivos}"
+        )
+    if est["paginas_total"] and est["paginas_sin_texto"] == est["paginas_total"]:
+        ocr_ok = bool(_preparar_ocr())
+        raise ValueError(
+            "Ninguna página de los PDFs tiene texto legible. "
+            + ("El OCR está activo pero no logró leer las páginas (revisa calidad del escaneo)."
+               if ocr_ok else
+               "Parecen escaneados y el OCR no está disponible: instala el binario tesseract "
+               "(tesseract-ocr y tesseract-ocr-spa) y los paquetes pytesseract y pypdfium2 (o pymupdf).")
         )
 
     # ---- 3. Decisión y escritura

@@ -133,7 +133,12 @@ async def iniciar_procesamiento(consolidado: UploadFile = File(...)):
             try:
                 destino = carpeta_actas / str(archivo["id"]) / Path(nombre).name
                 destino.parent.mkdir(parents=True, exist_ok=True)
-                destino.write_bytes(supabase_storage.descargar_bytes(archivo["ruta"]))
+                datos = supabase_storage.descargar_bytes(archivo["ruta"])
+                if not datos:
+                    raise ValueError("el archivo descargado está vacío")
+                if b"%PDF" not in datos[:1024]:
+                    raise ValueError("el contenido descargado no es un PDF válido")
+                destino.write_bytes(datos)
                 return nombre, True, None
             except Exception as e:
                 return nombre, False, f"{type(e).__name__}: {e}"
