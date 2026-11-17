@@ -63,7 +63,6 @@ def _cargar_historico(limite: int = 60) -> list[dict]:
 @router.post("")
 async def ejecutar_estadisticas(
     archivo: UploadFile = File(...),
-    limite: int = Form(20),
     top_n: int = Form(10),
     # Opcional: JSON con supuestos, p. ej. {"base": {"con_sync": 0.8}}
     supuestos: Optional[str] = Form(None),
@@ -71,8 +70,8 @@ async def ejecutar_estadisticas(
 ):
     if Path(archivo.filename).suffix.lower() not in EXTENSIONES_PERMITIDAS:
         raise HTTPException(status_code=400, detail="El archivo debe ser .xlsx.")
-    if limite < 0 or not (1 <= top_n <= 50):
-        raise HTTPException(status_code=400, detail="Parámetros fuera de rango (límite >= 0, top entre 1 y 50).")
+    if not (1 <= top_n <= 50):
+        raise HTTPException(status_code=400, detail="El top debe estar entre 1 y 50.")
 
     supuestos_dict = None
     if supuestos:
@@ -99,7 +98,6 @@ async def ejecutar_estadisticas(
             resultado = await run_in_threadpool(
                 estadisticas_juicios.analizar,
                 archivo=ruta_entrada,
-                limite=limite,
                 top_n=top_n,
                 supuestos=supuestos_dict,
                 historico=historico,
@@ -110,7 +108,7 @@ async def ejecutar_estadisticas(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error procesando el archivo: {e}")
 
-        parametros = {"limite": limite, "top_n": top_n, "archivo": archivo.filename, "supuestos": supuestos_dict}
+        parametros = {"top_n": top_n, "archivo": archivo.filename, "supuestos": supuestos_dict}
         id_bd = guardar_ejecucion(
             modulo=NOMBRE_MODULO,
             parametros=parametros,

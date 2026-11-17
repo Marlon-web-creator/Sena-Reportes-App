@@ -103,7 +103,7 @@
           <ul>
             <li>Resueltos: ${fmt(s.resueltos)}</li>
             <li>Nuevos: ${fmt(s.nuevos)}</li>
-            <li>Aprendices sobre el límite: ${fmt(s.aprendices_sobre_limite)}</li>
+            <li>Promedio por aprendiz: ${s.promedio_por_aprendiz}</li>
           </ul>
         </div>`
       )
@@ -134,7 +134,6 @@
       [fmt(r.fichas), "Fichas"],
       [fmt(r.programas), "Programas"],
       [r.promedio_por_aprendiz, "Promedio por aprendiz"],
-      [`${fmt(r.aprendices_sobre_limite)} (${r.pct_aprendices_sobre_limite}%)`, `Aprendices > ${r.limite}`],
       [fmt(s.riesgo_cierre.pendientes), `En ${esc(s.riesgo_cierre.trimestre || "—")} (riesgo cierre)`],
     ]
       .map(([v, l]) => `<div class="kpi"><b>${v}</b><span>${l}</span></div>`)
@@ -211,7 +210,7 @@
           if (typeof r === "string") { try { r = JSON.parse(r); } catch { r = null; } }
           const res = r?.estadisticas?.resumen;
           const txt = res
-            ? `${esc(res.fecha_reporte)} · ${fmt(res.total_pendientes)} pendientes · ${fmt(res.aprendices_sobre_limite)} aprendices sobre el límite`
+            ? `${esc(res.fecha_reporte)} · ${fmt(res.total_pendientes)} pendientes · ${fmt(res.aprendices)} aprendices`
             : "Ejecución";
           return `<div class="historial-item">${txt}</div>`;
         })
@@ -233,7 +232,6 @@
 
     const fd = new FormData();
     fd.append("archivo", f);
-    fd.append("limite", $("limite").value || "20");
     fd.append("supuestos", JSON.stringify(leerSupuestos()));
 
     $("btnProcesar").disabled = true;

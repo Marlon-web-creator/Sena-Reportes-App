@@ -175,14 +175,12 @@ def _leer(archivo: Path, fila_encabezado: int | None):
 # ----------------------------------------------------------------- principal
 def analizar(
     archivo: Path,
-    limite: int = 20,
     top_n: int = 10,
     supuestos: dict | None = None,
     historico: list[dict] | None = None,
     fila_encabezado: int | None = None,
 ) -> dict:
     """
-    limite     : umbral de pendientes por aprendiz (igual que en Depuración).
     supuestos  : sobreescribe SUPUESTOS_DEFECTO (por escenario y clave).
     historico  : lista [{"fecha": date, "total_pendientes": int}, ...] de
                  ejecuciones previas, para la proyección histórica.
@@ -193,7 +191,6 @@ def analizar(
     total = 0
     por_programa = defaultdict(lambda: {"filas": 0, "aprendices": set(), "fichas": set(), "cat": Counter()})
     por_aprendiz = Counter()
-    aprendiz_cat = defaultdict(Counter)          # documento -> Counter(categoría)
     aprendiz_nombre: dict[str, str] = {}
     por_ficha = Counter()
     por_rap = Counter()
@@ -225,7 +222,6 @@ def analizar(
         p["cat"][cat] += 1
 
         por_aprendiz[doc] += 1
-        aprendiz_cat[doc][cat] += 1
         aprendiz_nombre.setdefault(doc, _txt(r.get("nombre")))
         por_ficha[ficha] += 1
         fichas.add(ficha)
@@ -256,7 +252,6 @@ def analizar(
     fecha_reporte = _parse_fecha(meta.get("fecha de generacion")) or date.today()
     n_aprend = len(aprendices)
     valores = list(por_aprendiz.values())
-    sobre_limite = sum(1 for v in valores if v > limite)
 
     # ---------------- estadísticas
     resumen = {
@@ -272,9 +267,6 @@ def analizar(
         "promedio_por_aprendiz": round(total / n_aprend, 1),
         "mediana_por_aprendiz": median(valores),
         "maximo_por_aprendiz": max(valores),
-        "limite": limite,
-        "aprendices_sobre_limite": sobre_limite,
-        "pct_aprendices_sobre_limite": _pct(sobre_limite, n_aprend),
     }
 
     gestion = [
@@ -343,7 +335,7 @@ def analizar(
         "trimestre_actual": f"T{t} {anio}",
         "trimestre_proyectado": f"T{t_sig} {anio_sig}",
         "estructural": _proyeccion_estructural(
-            total, aprendiz_cat, categorias, limite, _mezclar(supuestos)
+            total, n_aprend, categorias, _mezclar(supuestos)
         ),
         "historica": _proyeccion_historica(historico or [], fecha_reporte, total),
     }
@@ -362,19 +354,12 @@ def _mezclar(supuestos: dict | None) -> dict:
     return res
 
 
-def _proyeccion_estructural(total, aprendiz_cat, categorias, limite, supuestos) -> dict:
+def _proyeccion_estructural(total, n_aprend, categorias, supuestos) -> dict:
     escenarios = {}
     for nombre, s in supuestos.items():
         resueltos = sum(categorias[c] * s[c] for c in CATEGORIAS)
         nuevos = total * s["nuevos_pct"]
         proyectado = total - resueltos + nuevos
-
-        sobre = 0
-        for cats in aprendiz_cat.values():
-            n_i = sum(cats.values())
-            quedan = sum(cats[c] * (1 - s[c]) for c in CATEGORIAS) + n_i * s["nuevos_pct"]
-            if quedan > limite:
-                sobre += 1
 
         escenarios[nombre] = {
             "supuestos": s,
@@ -383,7 +368,7 @@ def _proyeccion_estructural(total, aprendiz_cat, categorias, limite, supuestos) 
             "pendientes_proyectados": round(proyectado),
             "reduccion_neta": round(total - proyectado),
             "reduccion_neta_pct": _pct(total - proyectado, total),
-            "aprendices_sobre_limite": sobre,
+            "promedio_por_aprendiz": round(proyectado / n_aprend, 1) if n_aprend else 0,
         }
     return {
         "base_pendientes": total,
