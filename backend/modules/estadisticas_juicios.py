@@ -56,12 +56,19 @@ CATEGORIAS = {
     "sin_asignacion": "Sin instructor asignado",
 }
 
-# Supuestos por defecto de la proyección (tasa de resolución por categoría
-# en un trimestre y nuevos pendientes como % del stock actual).
+# Resultados de aprendizaje (RAP) que se ven por aprendiz en cada trimestre.
+# Dato del usuario; el archivo lo confirma (~10 RAPs distintos por ficha y
+# trimestre). Cada RAP visto genera un juicio por aprendiz.
+RAPS_POR_TRIMESTRE_DEFECTO = 10
+
+# Supuestos por defecto de la proyección, por escenario:
+#  - tasa de resolución por categoría de pendiente en un trimestre
+#  - calif_oportuna: fracción de los juicios NUEVOS del trimestre que se
+#    califica dentro del mismo trimestre (el resto queda pendiente)
 SUPUESTOS_DEFECTO = {
-    "conservador": {"con_sync": 0.50, "solo_svp": 0.25, "sin_asignacion": 0.05, "nuevos_pct": 0.15},
-    "base":        {"con_sync": 0.70, "solo_svp": 0.40, "sin_asignacion": 0.10, "nuevos_pct": 0.10},
-    "optimista":   {"con_sync": 0.85, "solo_svp": 0.60, "sin_asignacion": 0.25, "nuevos_pct": 0.05},
+    "conservador": {"con_sync": 0.50, "solo_svp": 0.25, "sin_asignacion": 0.05, "calif_oportuna": 0.50},
+    "base":        {"con_sync": 0.70, "solo_svp": 0.40, "sin_asignacion": 0.10, "calif_oportuna": 0.70},
+    "optimista":   {"con_sync": 0.85, "solo_svp": 0.60, "sin_asignacion": 0.25, "calif_oportuna": 0.90},
 }
 
 
@@ -176,11 +183,13 @@ def _leer(archivo: Path, fila_encabezado: int | None):
 def analizar(
     archivo: Path,
     top_n: int = 10,
+    raps_por_trimestre: int = RAPS_POR_TRIMESTRE_DEFECTO,
     supuestos: dict | None = None,
     historico: list[dict] | None = None,
     fila_encabezado: int | None = None,
 ) -> dict:
     """
+    raps_por_trimestre : RAPs que ve cada aprendiz por trimestre (default 10).
     supuestos  : sobreescribe SUPUESTOS_DEFECTO (por escenario y clave).
     historico  : lista [{"fecha": date, "total_pendientes": int}, ...] de
                  ejecuciones previas, para la proyección histórica.
@@ -200,6 +209,10 @@ def analizar(
     tipo, estado = Counter(), Counter()
     categorias = Counter()
     fichas, aprendices, raps = set(), set(), set()
+    aprendiz_cat = defaultdict(Counter)
+    aprendiz_ficha: dict[str, str] = {}
+    ficha_info: dict[str, dict] = {}
+    raps_ficha_trim = defaultdict(set)          # (ficha, trimestre visto) -> {id_rap}
 
     for r in filas:
         total += 1
@@ -222,6 +235,8 @@ def analizar(
         p["cat"][cat] += 1
 
         por_aprendiz[doc] += 1
+        aprendiz_cat[doc][cat] += 1
+        aprendiz_ficha.setdefault(doc, ficha)
         aprendiz_nombre.setdefault(doc, _txt(r.get("nombre")))
         por_ficha[ficha] += 1
         fichas.add(ficha)
@@ -237,6 +252,14 @@ def analizar(
                 svp_cnt[_txt(r["svp"])] += 1
             if _lleno(r.get("sync")):
                 sync_cnt[_txt(r["sync"])] += 1
+
+        fi = ficha_info.setdefault(ficha, {"programa": prog, "trim_actual": _txt(r.get("trim_actual")) or "Sin trimestre",
+                                           "aprendices": set(), "pendientes": 0})
+        fi["aprendices"].add(doc)
+        fi["pendientes"] += 1
+        tv = _txt(r.get("trim_visto"))
+        if tv:
+            raps_ficha_trim[(ficha, tv)].add(id_rap)
 
         trim_actual[_txt(r.get("trim_actual")) or "Sin trimestre"] += 1
         trim_visto[_txt(r.get("trim_visto")) or "No visto"] += 1
@@ -300,6 +323,17 @@ def analizar(
     numeros = [int(k[1:]) for k in trim_actual if re.fullmatch(r"T\d+", k)]
     t_max = f"T{max(numeros)}" if numeros else None
 
+    por_trim = defaultdict(list)
+    for (_, tv), conj in raps_ficha_trim.items():
+        por_trim[tv].append(len(conj))
+    todos = [n for v in por_trim.values() for n in v]
+    raps_observado = {
+        "promedio": round(sum(todos) / len(todos), 1) if todos else None,
+        "mediana": median(todos) if todos else None,
+        "por_trimestre": {t: round(sum(v) / len(v), 1) for t, v in sorted(por_trim.items())},
+        "nota": "RAPs distintos por ficha y trimestre en que se vieron (solo los que aún tienen pendientes).",
+    }
+
     estadisticas = {
         "resumen": resumen,
         "gestion": gestion,
@@ -309,6 +343,7 @@ def analizar(
         "por_trimestre_programacion_sync": _dist(t_sync),
         "por_tipo": _dist(tipo),
         "por_estado_aprendiz": _dist(estado),
+        "raps_por_trimestre_observado": raps_observado,
         "riesgo_cierre": {
             "trimestre": t_max,
             "pendientes": trim_actual.get(t_max, 0) if t_max else 0,
@@ -335,12 +370,43 @@ def analizar(
         "trimestre_actual": f"T{t} {anio}",
         "trimestre_proyectado": f"T{t_sig} {anio_sig}",
         "estructural": _proyeccion_estructural(
-            total, n_aprend, categorias, _mezclar(supuestos)
+            total, n_aprend, categorias, _mezclar(supuestos), max(0, int(raps_por_trimestre))
         ),
         "historica": _proyeccion_historica(historico or [], fecha_reporte, total),
     }
 
-    return {"estadisticas": estadisticas, "proyeccion": proyeccion}
+    # Listados COMPLETOS (sin top) para el Excel. El router los retira del JSON
+    # antes de guardarlo en BD / enviarlo al navegador.
+    completo = {
+        "aprendices": sorted(
+            (
+                {"documento": d, "nombre": aprendiz_nombre.get(d, ""),
+                 "ficha": aprendiz_ficha.get(d, ""),
+                 "programa": ficha_info.get(aprendiz_ficha.get(d, ""), {}).get("programa", ""),
+                 "pendientes": n, "con_sync": aprendiz_cat[d]["con_sync"],
+                 "solo_svp": aprendiz_cat[d]["solo_svp"],
+                 "sin_asignacion": aprendiz_cat[d]["sin_asignacion"]}
+                for d, n in por_aprendiz.items()
+            ),
+            key=lambda x: x["pendientes"], reverse=True,
+        ),
+        "fichas": sorted(
+            (
+                {"ficha": f, "programa": i["programa"], "trim_actual": i["trim_actual"],
+                 "aprendices": len(i["aprendices"]), "pendientes": i["pendientes"]}
+                for f, i in ficha_info.items()
+            ),
+            key=lambda x: x["pendientes"], reverse=True,
+        ),
+        "raps": [
+            {"id_rap": k, "resultado": rap_nombre.get(k, ""), "pendientes": v}
+            for k, v in por_rap.most_common()
+        ],
+        "instructores_svp": _top(svp_cnt, len(svp_cnt) or 1),
+        "instructores_sync": _top(sync_cnt, len(sync_cnt) or 1),
+    }
+
+    return {"estadisticas": estadisticas, "proyeccion": proyeccion, "_completo": completo}
 
 
 # ---------------------------------------------------------------- proyección
@@ -354,13 +420,19 @@ def _mezclar(supuestos: dict | None) -> dict:
     return res
 
 
-def _proyeccion_estructural(total, n_aprend, categorias, supuestos) -> dict:
+def _proyeccion_estructural(total, n_aprend, categorias, supuestos, raps_por_trimestre) -> dict:
+    """
+    pendientes_proyectados = actuales - resueltos + nuevos que quedan pendientes
+      resueltos = sum(pendientes de cada categoría x tasa de resolución)
+      generados = aprendices x RAPs por trimestre   (juicios nuevos del trimestre)
+      nuevos    = generados x (1 - calif_oportuna)
+    """
+    generados = n_aprend * raps_por_trimestre
     escenarios = {}
     for nombre, s in supuestos.items():
         resueltos = sum(categorias[c] * s[c] for c in CATEGORIAS)
-        nuevos = total * s["nuevos_pct"]
+        nuevos = generados * (1 - s["calif_oportuna"])
         proyectado = total - resueltos + nuevos
-
         escenarios[nombre] = {
             "supuestos": s,
             "resueltos": round(resueltos),
@@ -372,10 +444,15 @@ def _proyeccion_estructural(total, n_aprend, categorias, supuestos) -> dict:
         }
     return {
         "base_pendientes": total,
+        "aprendices": n_aprend,
+        "raps_por_trimestre": raps_por_trimestre,
+        "juicios_generados_trimestre": generados,
+        "categorias": {c: categorias[c] for c in CATEGORIAS},
         "escenarios": escenarios,
         "advertencia": (
-            "Las tasas de resolución y de pendientes nuevos son supuestos editables, "
-            "no datos del archivo. Ajústalos con el comportamiento real de tu centro."
+            "Las tasas de resolución y de calificación oportuna son supuestos editables, "
+            "no datos del archivo. Los RAPs por trimestre (10) los fija el usuario; el archivo "
+            "los confirma de forma aproximada."
         ),
     }
 

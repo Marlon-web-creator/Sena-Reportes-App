@@ -11,15 +11,15 @@
   const ENDPOINT = `${API_URL}/api/estadisticas-juicios`;
 
   const SUPUESTOS = {
-    conservador: { con_sync: 0.5, solo_svp: 0.25, sin_asignacion: 0.05, nuevos_pct: 0.15 },
-    base: { con_sync: 0.7, solo_svp: 0.4, sin_asignacion: 0.1, nuevos_pct: 0.1 },
-    optimista: { con_sync: 0.85, solo_svp: 0.6, sin_asignacion: 0.25, nuevos_pct: 0.05 },
+    conservador: { con_sync: 0.5, solo_svp: 0.25, sin_asignacion: 0.05, calif_oportuna: 0.5 },
+    base: { con_sync: 0.7, solo_svp: 0.4, sin_asignacion: 0.1, calif_oportuna: 0.7 },
+    optimista: { con_sync: 0.85, solo_svp: 0.6, sin_asignacion: 0.25, calif_oportuna: 0.9 },
   };
   const ETIQ = {
     con_sync: "Visto en Synchronize",
     solo_svp: "Solo SVP",
     sin_asignacion: "Sin asignación",
-    nuevos_pct: "Nuevos (% stock)",
+    calif_oportuna: "Juicios nuevos calificados a tiempo",
   };
 
   const $ = (id) => document.getElementById(id);
@@ -102,7 +102,7 @@
           <div>${s.reduccion_neta_pct >= 0 ? "▼" : "▲"} ${Math.abs(s.reduccion_neta_pct)}% neto vs hoy</div>
           <ul>
             <li>Resueltos: ${fmt(s.resueltos)}</li>
-            <li>Nuevos: ${fmt(s.nuevos)}</li>
+            <li>Nuevos que quedan pendientes: ${fmt(s.nuevos)}</li>
             <li>Promedio por aprendiz: ${s.promedio_por_aprendiz}</li>
           </ul>
         </div>`
@@ -118,7 +118,9 @@
     return `
       <div class="bloque">
         <h3>Proyección para ${esc(p.trimestre_proyectado)} (hoy: ${esc(p.trimestre_actual)})</h3>
-        <p class="aviso">Base actual: ${fmt(e.base_pendientes)} pendientes.</p>
+        <p class="aviso">Base actual: ${fmt(e.base_pendientes)} pendientes. Cada trimestre se ven
+          ${e.raps_por_trimestre} RAPs por aprendiz: ${fmt(e.aprendices)} aprendices generan
+          ${fmt(e.juicios_generados_trimestre)} juicios nuevos.</p>
         <div class="escenarios">${tarjetas}</div>
         <p class="aviso">${esc(e.advertencia)}</p>
       </div>
@@ -139,8 +141,19 @@
       .map(([v, l]) => `<div class="kpi"><b>${v}</b><span>${l}</span></div>`)
       .join("");
 
+    const ob = s.raps_por_trimestre_observado || {};
+    const observado = ob.promedio
+      ? ` · Observado en el archivo: ${ob.promedio} RAPs por ficha y trimestre`
+      : "";
+    const descarga = data.archivo_excel
+      ? `<p><a class="btn-primary" style="display:inline-block;text-decoration:none"
+            href="${ENDPOINT}/descargar/${encodeURIComponent(data.id_ejecucion)}/${encodeURIComponent(data.archivo_excel)}">
+            Descargar Excel</a></p>`
+      : "";
+
     $("resultado").innerHTML = `
-      <p class="aviso">Reporte del ${esc(r.fecha_reporte)} · ${esc(r.archivo_origen)}</p>
+      ${descarga}
+      <p class="aviso">Reporte del ${esc(r.fecha_reporte)} · ${esc(r.archivo_origen)}${esc(observado)}</p>
       <div class="kpis">${kpis}</div>
 
       ${renderProyeccion(data.proyeccion)}
@@ -232,6 +245,7 @@
 
     const fd = new FormData();
     fd.append("archivo", f);
+    fd.append("raps_por_trimestre", $("raps").value || "10");
     fd.append("supuestos", JSON.stringify(leerSupuestos()));
 
     $("btnProcesar").disabled = true;
