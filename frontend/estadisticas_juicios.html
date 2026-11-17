@@ -43,7 +43,7 @@
         <h2>1. Configuración</h2>
 
         <label class="field">
-          <span>RAPs que se ven por trimestre (por aprendiz)</span>
+          <span>Resultados de aprendizaje (RAP) que ve cada aprendiz por trimestre</span>
           <input type="number" id="raps" value="10" min="0" max="100" />
         </label>
 
@@ -57,10 +57,11 @@
         <details class="supuestos">
           <summary>Supuestos de la proyección (opcional)</summary>
           <p class="aviso">
-            Fracción (0 a 1) de pendientes que se resuelve en un trimestre por
-            tipo, y fracción de los juicios nuevos del trimestre que se
-            califica dentro del mismo trimestre. El resto de los juicios
-            nuevos queda pendiente.
+            Indica qué fracción (de 0 a 1) de los juicios pendientes se
+            califica en un trimestre, según su tipo, y qué fracción de los
+            juicios nuevos del trimestre se califica a tiempo. Ejemplo: 0,7
+            significa 70 %. Los juicios nuevos que no se califican a tiempo
+            quedan pendientes.
           </p>
           <div class="tabla-wrap">
             <table class="tabla" id="tablaSupuestos"></table>

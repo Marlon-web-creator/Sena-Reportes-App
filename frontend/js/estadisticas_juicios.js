@@ -16,9 +16,9 @@
     optimista: { con_sync: 0.85, solo_svp: 0.6, sin_asignacion: 0.25, calif_oportuna: 0.9 },
   };
   const ETIQ = {
-    con_sync: "Visto en Synchronize",
-    solo_svp: "Solo SVP",
-    sin_asignacion: "Sin asignación",
+    con_sync: "Juicios ya vistos en Synchronize",
+    solo_svp: "Juicios solo en SVP",
+    sin_asignacion: "Juicios sin instructor",
     calif_oportuna: "Juicios nuevos calificados a tiempo",
   };
 
@@ -83,7 +83,7 @@
     return `<div class="bloque"><h3>${esc(titulo)}</h3>${tabla(
       [
         { t: "Etiqueta", k: "etiqueta" },
-        { t: "Pendientes", num: true, r: (f) => fmt(f.pendientes) },
+        { t: "Juicios pendientes", num: true, r: (f) => fmt(f.pendientes) },
         { t: "%", num: true, r: (f) => f.pct + "%" },
         { t: "", r: (f) => barra(f.pct) },
       ],
@@ -99,11 +99,12 @@
         <div class="esc">
           <h4>${esc(nombre)}</h4>
           <div class="gran">${fmt(s.pendientes_proyectados)}</div>
-          <div>${s.reduccion_neta_pct >= 0 ? "▼" : "▲"} ${Math.abs(s.reduccion_neta_pct)}% neto vs hoy</div>
+          <div>juicios pendientes al final del trimestre</div>
+          <div>${s.reduccion_neta_pct >= 0 ? "▼" : "▲"} ${Math.abs(s.reduccion_neta_pct)}% ${s.reduccion_neta_pct >= 0 ? "menos" : "más"} que hoy</div>
           <ul>
-            <li>Resueltos: ${fmt(s.resueltos)}</li>
-            <li>Nuevos que quedan pendientes: ${fmt(s.nuevos)}</li>
-            <li>Promedio por aprendiz: ${s.promedio_por_aprendiz}</li>
+            <li>Juicios que se califican: ${fmt(s.resueltos)}</li>
+            <li>Juicios nuevos que quedan sin calificar: ${fmt(s.nuevos)}</li>
+            <li>Juicios pendientes por aprendiz: ${s.promedio_por_aprendiz}</li>
           </ul>
         </div>`
       )
@@ -111,16 +112,16 @@
 
     const h = p.historica;
     const hist = h.disponible
-      ? `<p><b>${fmt(h.pendientes_proyectados)}</b> pendientes proyectados al ${esc(h.fecha_proyeccion)}
-         (${h.cambio_por_dia > 0 ? "+" : ""}${h.cambio_por_dia}/día; ${h.puntos} reportes; confiabilidad ${esc(h.confiabilidad)}).</p>`
+      ? `<p><b>${fmt(h.pendientes_proyectados)}</b> juicios pendientes proyectados al ${esc(h.fecha_proyeccion)}
+         (${h.cambio_por_dia > 0 ? "+" : ""}${h.cambio_por_dia} juicios por día; ${h.puntos} reportes; confiabilidad ${esc(h.confiabilidad)}).</p>`
       : `<p class="aviso">${esc(h.mensaje)}</p>`;
 
     return `
       <div class="bloque">
-        <h3>Proyección para ${esc(p.trimestre_proyectado)} (hoy: ${esc(p.trimestre_actual)})</h3>
-        <p class="aviso">Base actual: ${fmt(e.base_pendientes)} pendientes. Cada trimestre se ven
-          ${e.raps_por_trimestre} RAPs por aprendiz: ${fmt(e.aprendices)} aprendices generan
-          ${fmt(e.juicios_generados_trimestre)} juicios nuevos.</p>
+        <h3>¿Cuántos juicios pendientes habría en ${esc(p.trimestre_proyectado)}? (hoy: ${esc(p.trimestre_actual)})</h3>
+        <p class="aviso">Hoy hay ${fmt(e.base_pendientes)} juicios pendientes. Cada trimestre cada aprendiz
+          ve ${e.raps_por_trimestre} resultados de aprendizaje (RAP) y cada RAP genera un juicio:
+          ${fmt(e.aprendices)} aprendices generan ${fmt(e.juicios_generados_trimestre)} juicios nuevos.</p>
         <div class="escenarios">${tarjetas}</div>
         <p class="aviso">${esc(e.advertencia)}</p>
       </div>
@@ -131,12 +132,12 @@
     const s = data.estadisticas;
     const r = s.resumen;
     const kpis = [
-      [fmt(r.total_pendientes), "Pendientes"],
-      [fmt(r.aprendices), "Aprendices"],
+      [fmt(r.total_pendientes), "Total de juicios pendientes"],
+      [fmt(r.aprendices), "Aprendices con juicios pendientes"],
       [fmt(r.fichas), "Fichas"],
       [fmt(r.programas), "Programas"],
-      [r.promedio_por_aprendiz, "Promedio por aprendiz"],
-      [fmt(s.riesgo_cierre.pendientes), `En ${esc(s.riesgo_cierre.trimestre || "—")} (riesgo cierre)`],
+      [r.promedio_por_aprendiz, "Promedio de juicios pendientes por aprendiz"],
+      [fmt(s.riesgo_cierre.pendientes), `Juicios pendientes en fichas de ${esc(s.riesgo_cierre.trimestre || "—")} (por cerrar etapa)`],
     ]
       .map(([v, l]) => `<div class="kpi"><b>${v}</b><span>${l}</span></div>`)
       .join("");
@@ -158,51 +159,51 @@
 
       ${renderProyeccion(data.proyeccion)}
 
-      <div class="bloque"><h3>Estado de gestión de los pendientes</h3>${tabla(
+      <div class="bloque"><h3>Estado de los juicios pendientes</h3>${tabla(
         [
           { t: "Tipo", k: "descripcion" },
-          { t: "Pendientes", num: true, r: (f) => fmt(f.pendientes) },
+          { t: "Juicios pendientes", num: true, r: (f) => fmt(f.pendientes) },
           { t: "%", num: true, r: (f) => f.pct + "%" },
           { t: "", r: (f) => barra(f.pct) },
         ],
         s.gestion
       )}</div>
 
-      <div class="bloque"><h3>Por programa de formación</h3>${tabla(
+      <div class="bloque"><h3>Juicios pendientes por programa de formación</h3>${tabla(
         [
           { t: "Programa", k: "programa" },
-          { t: "Pendientes", num: true, r: (f) => fmt(f.pendientes) },
+          { t: "Juicios pendientes", num: true, r: (f) => fmt(f.pendientes) },
           { t: "%", num: true, r: (f) => f.pct + "%" },
           { t: "Aprendices", num: true, r: (f) => fmt(f.aprendices) },
           { t: "Fichas", num: true, r: (f) => fmt(f.fichas) },
-          { t: "Prom./aprendiz", num: true, k: "promedio_por_aprendiz" },
-          { t: "Sin asignación", num: true, r: (f) => fmt(f.sin_asignacion) },
+          { t: "Juicios por aprendiz", num: true, k: "promedio_por_aprendiz" },
+          { t: "Sin instructor", num: true, r: (f) => fmt(f.sin_asignacion) },
         ],
         s.por_programa
       )}</div>
 
-      ${distribucion("Por trimestre actual de la ficha", s.por_trimestre_ficha)}
-      ${distribucion("Trimestre en que vieron el resultado", s.por_trimestre_visto)}
-      ${distribucion("Trimestre del año programado en Synchronize", s.por_trimestre_programacion_sync)}
+      ${distribucion("Juicios pendientes por trimestre actual de la ficha", s.por_trimestre_ficha)}
+      ${distribucion("Juicios pendientes según el trimestre en que vieron el resultado", s.por_trimestre_visto)}
+      ${distribucion("Juicios pendientes según el trimestre del año programado en Synchronize", s.por_trimestre_programacion_sync)}
 
-      <div class="bloque"><h3>Top instructores con pendientes (SVP)</h3>${tabla(
-        [{ t: "Instructor", k: "nombre" }, { t: "Pendientes", num: true, r: (f) => fmt(f.pendientes) }],
+      <div class="bloque"><h3>Instructores con más juicios pendientes (programados en SVP)</h3>${tabla(
+        [{ t: "Instructor", k: "nombre" }, { t: "Juicios pendientes", num: true, r: (f) => fmt(f.pendientes) }],
         s.top_instructores_svp
       )}</div>
-      <div class="bloque"><h3>Top instructores sin calificar (Synchronize)</h3>${tabla(
-        [{ t: "Instructor", k: "nombre" }, { t: "Pendientes", num: true, r: (f) => fmt(f.pendientes) }],
+      <div class="bloque"><h3>Instructores con más juicios sin calificar (Synchronize)</h3>${tabla(
+        [{ t: "Instructor", k: "nombre" }, { t: "Juicios pendientes", num: true, r: (f) => fmt(f.pendientes) }],
         s.top_instructores_sync
       )}</div>
-      <div class="bloque"><h3>Top fichas</h3>${tabla(
-        [{ t: "Ficha", k: "ficha" }, { t: "Pendientes", num: true, r: (f) => fmt(f.pendientes) }],
+      <div class="bloque"><h3>Fichas con más juicios pendientes</h3>${tabla(
+        [{ t: "Ficha", k: "ficha" }, { t: "Juicios pendientes", num: true, r: (f) => fmt(f.pendientes) }],
         s.top_fichas
       )}</div>
-      <div class="bloque"><h3>Aprendices con más pendientes</h3>${tabla(
-        [{ t: "Documento", k: "documento" }, { t: "Nombre", k: "nombre" }, { t: "Pendientes", num: true, r: (f) => fmt(f.pendientes) }],
+      <div class="bloque"><h3>Aprendices con más juicios pendientes</h3>${tabla(
+        [{ t: "Documento", k: "documento" }, { t: "Nombre", k: "nombre" }, { t: "Juicios pendientes", num: true, r: (f) => fmt(f.pendientes) }],
         s.top_aprendices
       )}</div>
-      <div class="bloque"><h3>Resultados de aprendizaje con más pendientes</h3>${tabla(
-        [{ t: "ID RAP", k: "id_rap" }, { t: "Resultado", k: "resultado" }, { t: "Pendientes", num: true, r: (f) => fmt(f.pendientes) }],
+      <div class="bloque"><h3>Resultados de aprendizaje con más juicios pendientes</h3>${tabla(
+        [{ t: "ID RAP", k: "id_rap" }, { t: "Resultado", k: "resultado" }, { t: "Juicios pendientes", num: true, r: (f) => fmt(f.pendientes) }],
         s.top_raps
       )}</div>`;
   }
@@ -223,7 +224,7 @@
           if (typeof r === "string") { try { r = JSON.parse(r); } catch { r = null; } }
           const res = r?.estadisticas?.resumen;
           const txt = res
-            ? `${esc(res.fecha_reporte)} · ${fmt(res.total_pendientes)} pendientes · ${fmt(res.aprendices)} aprendices`
+            ? `${esc(res.fecha_reporte)} · ${fmt(res.total_pendientes)} juicios pendientes · ${fmt(res.aprendices)} aprendices`
             : "Ejecución";
           return `<div class="historial-item">${txt}</div>`;
         })

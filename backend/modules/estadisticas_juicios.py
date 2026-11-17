@@ -51,9 +51,9 @@ _COLUMNAS = {
 _REQUERIDAS = ("ficha", "programa", "documento", "id_rap", "svp", "sync")
 
 CATEGORIAS = {
-    "con_sync": "Visto en Synchronize, falta calificar",
-    "solo_svp": "Programado en SVP, sin programación en Synchronize",
-    "sin_asignacion": "Sin instructor asignado",
+    "con_sync": "Ya vieron el resultado (Synchronize); falta que el instructor califique",
+    "solo_svp": "Instructor programado en SVP, pero sin registro en Synchronize",
+    "sin_asignacion": "Sin instructor asignado para calificar",
 }
 
 # Resultados de aprendizaje (RAP) que se ven por aprendiz en cada trimestre.
@@ -331,7 +331,7 @@ def analizar(
         "promedio": round(sum(todos) / len(todos), 1) if todos else None,
         "mediana": median(todos) if todos else None,
         "por_trimestre": {t: round(sum(v) / len(v), 1) for t, v in sorted(por_trim.items())},
-        "nota": "RAPs distintos por ficha y trimestre en que se vieron (solo los que aún tienen pendientes).",
+        "nota": "RAPs (resultados de aprendizaje) distintos por ficha y trimestre en que se vieron; solo cuentan los que aún tienen juicios pendientes.",
     }
 
     estadisticas = {
@@ -348,7 +348,7 @@ def analizar(
             "trimestre": t_max,
             "pendientes": trim_actual.get(t_max, 0) if t_max else 0,
             "pct": _pct(trim_actual.get(t_max, 0), total) if t_max else 0.0,
-            "nota": "Fichas en el trimestre más alto observado: menos tiempo para resolver.",
+            "nota": "Juicios pendientes de fichas en el trimestre más alto observado: les queda menos tiempo para calificarse.",
         },
         "top_instructores_svp": _top(svp_cnt, top_n),
         "top_instructores_sync": _top(sync_cnt, top_n),
@@ -450,9 +450,9 @@ def _proyeccion_estructural(total, n_aprend, categorias, supuestos, raps_por_tri
         "categorias": {c: categorias[c] for c in CATEGORIAS},
         "escenarios": escenarios,
         "advertencia": (
-            "Las tasas de resolución y de calificación oportuna son supuestos editables, "
-            "no datos del archivo. Los RAPs por trimestre (10) los fija el usuario; el archivo "
-            "los confirma de forma aproximada."
+            "Los porcentajes de juicios que se califican en el trimestre son supuestos editables, "
+            "no datos del archivo. Los RAPs (resultados de aprendizaje) por trimestre (10) los fija el "
+            "usuario; el archivo los confirma de forma aproximada."
         ),
     }
 
@@ -467,7 +467,7 @@ def _proyeccion_historica(historico: list[dict], fecha_actual: date, total_actua
         return {
             "disponible": False,
             "puntos": len(serie),
-            "mensaje": "Se necesitan al menos 2 reportes de fechas distintas para calcular tendencia. "
+            "mensaje": "Se necesitan al menos 2 reportes de fechas distintas para calcular la tendencia de juicios pendientes. "
                        "Sube reportes periódicos (p. ej. semanales) y esta proyección se activará sola.",
         }
 
