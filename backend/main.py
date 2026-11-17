@@ -23,6 +23,7 @@ from routers import (
     horas_instructores_router,
     archivos_router,
     chatbot_router,
+    estadisticas_juicios_router,
 )
 
 app = FastAPI(title="SENA Reportes App", version="0.1.0")
@@ -41,6 +42,7 @@ app.include_router(juicios_practica_router.router)
 app.include_router(horas_instructores_router.router)
 app.include_router(archivos_router.router)
 app.include_router(chatbot_router.router)
+app.include_router(estadisticas_juicios_router.router)
 
 print(">>> RUTAS ARCHIVOS REGISTRADAS:")
 for ruta in app.routes:
